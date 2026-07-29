@@ -120,26 +120,32 @@ model rather than reusing one figure.
 python3 tools/genvol/measure_ratio.py /path/to/corpus --model claude-haiku-4-5
 python3 tools/genvol/measure_ratio.py /path/to/corpus --dry-run   # no API calls
 
-# through an existing AWS session instead of an API key
-python3 tools/genvol/measure_ratio.py /path/to/corpus --provider bedrock \
-    --aws-region eu-north-1 --model claude-haiku-4-5
+# Bedrock, using an existing AWS session and the dated InvokeModel ID
+python3 tools/genvol/measure_ratio.py /path/to/corpus \
+    --provider bedrock-native --aws-region eu-north-1 \
+    --model anthropic.claude-haiku-4-5-20251001-v1:0
 ```
 
-`--provider bedrock` needs `pip install "anthropic[bedrock]" "botocore[crt]"` and
-an account that has been **granted access to the model** — a valid AWS session is
-not enough on its own, and a missing grant surfaces as
-`403 … is not available for this account`. Bedrock's Messages-API endpoint also
-wants the bare prefixed ID (`anthropic.claude-haiku-4-5`); the dated form that
-`aws bedrock list-foundation-models` prints returns 404 there. The script adds
-the prefix for you.
+### Counting tokens on Bedrock
+
+Bedrock has three routes and only one of them counts tokens. If you deploy with
+the dated `…-20251001-v1:0` IDs, **`--provider bedrock-native` is the one you
+want** (`pip install boto3`):
+
+| Route | Counting |
+|---|---|
+| `AnthropicBedrock` (legacy `InvokeModel`) | refuses: *"Token counting is not supported in Bedrock yet"* |
+| `AnthropicBedrockMantle` (Messages API) — `--provider bedrock` | works, but only with short prefixed IDs (`anthropic.claude-haiku-4-5`); the dated IDs 404, and the account needs a separate model-access grant or every call is `403 … is not available for this account` |
+| `bedrock-runtime` `CountTokens` via boto3 — `--provider bedrock-native` | works, and accepts the dated IDs |
+
+Two things the Bedrock route needs that are easy to miss: `botocore[crt]` (its
+absence surfaces as a `MissingDependencyException` that says nothing about AWS),
+and `max_tokens` in the `invokeModel` body — required even though nothing is
+being generated. The script supplies the latter.
 
 It counts the largest programs exactly — that is where overflow risk lives —
 plus a spread across the size range, and counts each program **together with its
 copybook closure**, since that is what a tool actually hands the model.
-
-The statistic that matters is the **minimum** ratio, not the mean: a lower ratio
-means more tokens per character, so the budget has to come from the worst case.
-An average that looks comfortable still hides the files that overflow.
 
 Judge the cap by the ratio at the **big end**, not the global minimum. Small
 files score systematically lower — the fixed message-envelope overhead is a large
