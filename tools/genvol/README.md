@@ -141,12 +141,19 @@ The statistic that matters is the **minimum** ratio, not the mean: a lower ratio
 means more tokens per character, so the budget has to come from the worst case.
 An average that looks comfortable still hides the files that overflow.
 
-Why it matters concretely: at a 200.000-token window with a 15% reserve, the
-largest file in a `--chars-per-token 3.4` corpus needs a real ratio of at least
-**3,23** to fit — under 5% of margin. If the real ratio is lower, the `0.95×`
-boundary programs move from just-inside to just-outside while the manifest still
-reports `fits_window: true`. That corrupts the ground truth precisely in the
-cases meant to exercise a routing decision.
+Judge the cap by the ratio at the **big end**, not the global minimum. Small
+files score systematically lower — the fixed message-envelope overhead is a large
+share of a short payload — and they are nowhere near the window, so a global
+minimum condemns a perfectly safe corpus. The script reports both and derives its
+verdict from the largest files.
+
+Measured for `anthropic.claude-haiku-4-5-20251001-v1:0` on Bedrock against both
+published corpora: **3,63–3,66 chars/token** at the big end, versus 3,26–3,28
+overall. A 12.000-line program (~550 KB with its copybooks) counts about
+**151.000 tokens**, leaving 11% headroom inside a 200.000-token window with a 15%
+reserve. The `--chars-per-token 3.4` those corpora were generated with turned out
+conservative; measure yours rather than reusing this figure, since it is
+tokenizer-specific.
 
 ### Keeping the whole corpus inside one window
 

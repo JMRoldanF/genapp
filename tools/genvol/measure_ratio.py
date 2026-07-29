@@ -112,10 +112,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--reserve", type=float, default=-1.0,
                     help="share held back for prompt and output; default reads "
                          "it from the manifest")
-    ap.add_argument("--provider", choices=("api", "bedrock", "aws"), default="api",
-                    help="api: first-party Claude API. bedrock: Amazon Bedrock "
-                         "(model IDs get an 'anthropic.' prefix). aws: Claude "
-                         "Platform on AWS (needs --aws-workspace-id)")
+    ap.add_argument("--provider",
+                    choices=("api", "bedrock", "bedrock-native", "aws"),
+                    default="api",
+                    help="api: first-party Claude API. bedrock: Bedrock's "
+                         "Messages-API (Mantle) endpoint, short prefixed model "
+                         "IDs. bedrock-native: Bedrock's own CountTokens "
+                         "operation via boto3, which accepts the dated "
+                         "InvokeModel IDs. aws: Claude Platform on AWS")
     ap.add_argument("--aws-region", default=os.environ.get("AWS_REGION"),
                     help="required for --provider bedrock/aws")
     ap.add_argument("--aws-workspace-id",
@@ -154,6 +158,48 @@ def main(argv: list[str] | None = None) -> int:
         print("\n--dry-run: no API calls made")
         return 0
 
+    counter, model = make_counter(cfg)
+    rows = []
+    for i, p in enumerate(sample, 1):
+        text = payload_for(cfg.corpus, p, closure, cb_path)
+        try:
+            tokens = counter(text)
+        except Exception as exc:                      # noqa: BLE001
+            sys.exit(f"token count failed on {p['name']} ({model}): {exc}")
+        rows.append((p["name"], p["lines"], len(text), tokens, len(text) / tokens))
+        print(f"\r  {i}/{len(sample)}", end="", file=sys.stderr)
+    print("\r" + " " * 20 + "\r", end="", file=sys.stderr)
+    return report(rows, window, reserve, assumed)
+
+
+def make_counter(cfg):
+    """Return (count_fn, resolved_model_id) for the selected provider."""
+    if cfg.provider == "bedrock-native":
+        # Bedrock's own CountTokens operation. Unlike the Messages-API endpoint
+        # it accepts the dated InvokeModel IDs (…-20251001-v1:0), and unlike the
+        # legacy anthropic AnthropicBedrock client it actually supports counting
+        # -- that one raises "Token counting is not supported in Bedrock yet".
+        try:
+            import boto3
+        except ImportError:
+            sys.exit("pip install boto3")
+        if not cfg.aws_region:
+            sys.exit("--provider bedrock-native needs --aws-region")
+        rt = boto3.client("bedrock-runtime", region_name=cfg.aws_region)
+        model = cfg.model
+
+        def count(text: str) -> int:
+            body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": text}],
+            })
+            resp = rt.count_tokens(
+                modelId=model, input={"invokeModel": {"body": body}})
+            return resp["inputTokens"]
+
+        return count, model
+
     try:
         import anthropic
     except ImportError:
@@ -182,50 +228,62 @@ def main(argv: list[str] | None = None) -> int:
     else:
         client = anthropic.Anthropic()
 
-    rows = []
-    for i, p in enumerate(sample, 1):
-        text = payload_for(cfg.corpus, p, closure, cb_path)
-        try:
-            tokens = client.messages.count_tokens(
-                model=model,
-                messages=[{"role": "user", "content": text}],
-            ).input_tokens
-        except Exception as exc:                      # noqa: BLE001
-            sys.exit(f"count_tokens failed on {p['name']} ({model}): {exc}")
-        rows.append((p["name"], p["lines"], len(text), tokens, len(text) / tokens))
-        print(f"\r  {i}/{len(sample)}", end="", file=sys.stderr)
-    print("\r" + " " * 20 + "\r", end="", file=sys.stderr)
+    def count(text: str) -> int:
+        return client.messages.count_tokens(
+            model=model, messages=[{"role": "user", "content": text}],
+        ).input_tokens
 
+    return count, model
+
+
+def report(rows, window: int, reserve: float, assumed: float) -> int:
+    usable = window * (1.0 - reserve)
     ratios = [r[4] for r in rows]
-    r_min, r_max = min(ratios), max(ratios)
-    r_mean = sum(ratios) / len(ratios)
 
     print(f"{'program':<10} {'lines':>8} {'chars':>10} {'tokens':>9} {'ch/tok':>7}")
     for name, lines, chars, tokens, ratio in rows[-12:]:
         print(f"{name:<10} {lines:>8,} {chars:>10,} {tokens:>9,} {ratio:>7.2f}")
-    print(f"\nratio: min {r_min:.2f}  mean {r_mean:.2f}  max {r_max:.2f}")
 
-    # The safe budget uses the worst ratio seen, not the average.
-    safe_budget = int(window * r_min * (1.0 - reserve))
-    assumed_budget = int(window * assumed * (1.0 - reserve))
-    print(f"budget at min ratio    {safe_budget:,} chars")
-    print(f"budget at assumed {assumed}  {assumed_budget:,} chars")
+    # Small files have a systematically lower ratio: the fixed message-envelope
+    # overhead is a large share of a short payload. Those files are nowhere near
+    # the window, so judging the cap by the global minimum would condemn a
+    # perfectly safe corpus. The verdict has to come from the big end.
+    big = rows[-max(3, len(rows) // 4):]
+    r_min_big = min(r[4] for r in big)
+    print(f"\nratio overall  min {min(ratios):.2f}  mean"
+          f" {sum(ratios) / len(ratios):.2f}  max {max(ratios):.2f}")
+    print(f"ratio big end  min {r_min_big:.2f}   <- the one that governs the cap")
+    print("  (small files score lower: the fixed envelope overhead dominates a"
+          " short payload)")
 
-    exact_over = [r for r in rows if r[3] > window * (1.0 - reserve)]
-    print(f"\nmeasured programs over the window: {len(exact_over)}")
-    for name, lines, chars, tokens, _ in exact_over:
-        print(f"  {name}  {tokens:,} tokens  ({lines:,} lines)")
+    worst_name, _, worst_chars, worst_tokens, _ = max(rows, key=lambda r: r[3])
+    headroom = usable - worst_tokens
+    print(f"\nlargest measured  {worst_name}  {worst_chars:,} chars ->"
+          f" {worst_tokens:,} tokens")
+    print(f"usable budget     {int(usable):,} tokens"
+          f" ({window:,} less {reserve:.0%} reserve)")
+    print(f"headroom          {int(headroom):,} tokens"
+          f" ({headroom / usable:+.0%})")
 
-    if r_min < assumed:
-        shortfall = (assumed - r_min) / assumed
-        print(f"\nWARNING: the real minimum ratio is {shortfall:.0%} below the"
-              f" assumed {assumed}.")
-        print("The corpus was sized against the assumed value, so files near the"
-              " cap may overflow.")
-        print(f"Regenerate with --chars-per-token {r_min:.2f} to be safe.")
-    else:
-        print(f"\nOK: the assumed {assumed} is conservative"
-              f" (real minimum {r_min:.2f}); the cap holds.")
+    over = [r for r in rows if r[3] > usable]
+    if over:
+        print(f"\nFAIL: {len(over)} measured programs exceed the usable budget:")
+        for name, lines, _, tokens, _ in over:
+            print(f"  {name}  {tokens:,} tokens  ({lines:,} lines)")
+        print(f"Regenerate with --chars-per-token {r_min_big:.2f}.")
+        return 1
+
+    if r_min_big < assumed:
+        print(f"\nWARNING: the big-end ratio {r_min_big:.2f} is below the assumed"
+              f" {assumed}.")
+        print("Nothing measured overflows, but the margin is thinner than"
+              " intended -- unmeasured files near the cap could exceed it.")
+        print(f"Regenerate with --chars-per-token {r_min_big:.2f} to restore it.")
+        return 0
+
+    print(f"\nOK: the assumed {assumed} was conservative (real big-end ratio"
+          f" {r_min_big:.2f}).")
+    print("Every measured program fits, with margin. No regeneration needed.")
     return 0
 
 
