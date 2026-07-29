@@ -66,6 +66,9 @@ def b(text: str, indent: int = 0) -> str:
 # Vocabulary -- keeps generated text lexically diverse
 # ---------------------------------------------------------------------------
 
+# Two-letter subsystem codes. The first ten are GenApp's own; the rest extend
+# the vocabulary so a large estate is not forced into ten giant blobs. None may
+# start with K, which is reserved for the ZK copybook prefix.
 DOMAINS = {
     "MT": ("MOTOR", "motor policy"),
     "HO": ("HOUSE", "house policy"),
@@ -77,6 +80,56 @@ DOMAINS = {
     "AG": ("AGENT", "agent and broker"),
     "PA": ("PAYMENT", "premium payment"),
     "UW": ("UNDERWR", "underwriting rules"),
+    "LI": ("LIFE", "life assurance"),
+    "HE": ("HEALTH", "health cover"),
+    "TR": ("TRAVEL", "travel cover"),
+    "PE": ("PET", "pet cover"),
+    "MA": ("MARINE", "marine cargo and hull"),
+    "AV": ("AVIATION", "aviation cover"),
+    "FL": ("FLEET", "commercial fleet"),
+    "CO": ("COMMRCL", "commercial lines"),
+    "LB": ("LIABLTY", "liability cover"),
+    "PR": ("PROPRTY", "property cover"),
+    "AN": ("ANNUITY", "annuity contracts"),
+    "PN": ("PENSION", "pension administration"),
+    "IV": ("INVEST", "investment funds"),
+    "TX": ("TAX", "premium tax and levies"),
+    "RG": ("REGLTRY", "regulatory reporting"),
+    "CP": ("COMPLNC", "compliance checks"),
+    "FR": ("FRAUD", "fraud detection"),
+    "AC": ("ACTUARL", "actuarial modelling"),
+    "RS": ("RESERVE", "technical reserving"),
+    "TY": ("TREATY", "treaty management"),
+    "BR": ("BROKER", "broker settlement"),
+    "PT": ("PARTNER", "partner integration"),
+    "DO": ("DOCUMNT", "document production"),
+    "CR": ("CORRESP", "customer correspondence"),
+    "NT": ("NOTIFY", "notification dispatch"),
+    "SC": ("SCHEDUL", "job scheduling"),
+    "WF": ("WORKFLW", "case workflow"),
+    "AU": ("AUDIT", "audit trail"),
+    "AR": ("ARCHIVE", "archival and retention"),
+    "BA": ("BATCH", "batch control"),
+    "IF": ("INTRFCE", "external interfaces"),
+    "GW": ("GATEWAY", "service gateway"),
+    "SE": ("SECURTY", "security services"),
+    "AZ": ("AUTHZ", "authorisation rules"),
+    "QU": ("QUOTE", "quotation engine"),
+    "RN": ("RENEWAL", "renewal processing"),
+    "ED": ("ENDORSE", "policy endorsement"),
+    "CN": ("CANCEL", "cancellation handling"),
+    "SU": ("SURRNDR", "surrender and maturity"),
+    "MB": ("MEMBER", "group membership"),
+    "PL": ("POLADMN", "policy administration"),
+    "RT": ("RATING", "rating tables"),
+    "DI": ("DISCONT", "discount schemes"),
+    "EX": ("EXCESS", "excess and deductible"),
+    "ST": ("SETTLE", "claim settlement"),
+    "RC": ("RECOVER", "recovery actions"),
+    "SL": ("SALVAGE", "salvage disposal"),
+    "SB": ("SUBROG", "subrogation"),
+    "LT": ("LITIGTN", "litigation tracking"),
+    "VA": ("VALUATN", "asset valuation"),
 }
 
 ENTITIES = [
@@ -248,6 +301,7 @@ class Topology:
         return max(120, int(self.window_budget_chars * 0.95 / CHARS_PER_LINE))
 
     def build(self) -> None:
+        self._build_partners()
         self._build_copybooks()
         self._build_programs()
         self._wire_calls()
@@ -319,9 +373,19 @@ class Topology:
         self.by_type: dict[str, list[Prog]] = {t: [] for t, _, _ in counts}
         self.by_domain_type: dict[tuple[str, str], list[Prog]] = {}
 
+        # Real estates have a few large core subsystems and a long tail of small
+        # ones. Round-robin assignment instead produces domains of identical
+        # size, which is both unrealistic and uninformative to cluster on.
+        weights = [1.0 / (1 + i) ** 0.6 for i in range(len(self.domains))]
+        self.mapset_seq: dict[str, int] = {d: 0 for d in self.domains}
+
         for ptype, layer, n in counts:
             for i in range(max(0, n)):
-                dom = self.domains[i % len(self.domains)]
+                # Seed every domain once so none is left empty, then weight.
+                if i < len(self.domains):
+                    dom = self.domains[i]
+                else:
+                    dom = self.rng.choices(self.domains, weights=weights)[0]
                 p = Prog(
                     name=self._pname(dom),
                     ptype=ptype,
@@ -331,7 +395,12 @@ class Topology:
                 )
                 if ptype == "driver":
                     p.transid = self._tranid()
-                    p.mapset = f"Z{dom}MAP{(i % 9) + 1:02d}"
+                    # Mapsets are shared, but the count has to grow with the
+                    # number of drivers -- a fixed 9 per domain meant ~89
+                    # drivers per mapset at 100k programs.
+                    self.mapset_seq[dom] += 1
+                    slot = (self.mapset_seq[dom] - 1) // self.cfg.drivers_per_mapset
+                    p.mapset = f"Z{dom}MAP{slot % 100:02d}"
                 if ptype != "batch":
                     p.copybooks.append(self.shared_commarea.name)
                 books = self.domain_books[dom]
@@ -362,13 +431,50 @@ class Topology:
                 self.by_type[ptype].append(p)
                 self.by_domain_type.setdefault((dom, ptype), []).append(p)
 
+    def _build_partners(self) -> None:
+        """Give each domain a few partner domains, instead of talking to all.
+
+        Choosing cross-domain targets uniformly at random produces a *complete*
+        domain-coupling graph with near-uniform weights -- every domain pair
+        connected, all about equally. That carries no signal: community
+        detection recovers the blocks trivially, and impact analysis answers
+        "everything, equally" for any change. Real estates couple sparsely and
+        unevenly, so restrict each domain to a handful of partners.
+        """
+        self.partners: dict[str, list[str]] = {}
+        for dom in self.domains:
+            others = [d for d in self.domains if d != dom]
+            if not others:
+                self.partners[dom] = []
+                continue
+            k = min(self.rng.randint(*self.cfg.partners), len(others))
+            self.partners[dom] = self.rng.sample(others, k)
+
     def _pick(self, ptype: str, domain: str, n: int) -> list[Prog]:
-        """Prefer same-domain targets so the graph shows real clustering."""
+        """Same-domain by default; otherwise only into a partner domain."""
         same = self.by_domain_type.get((domain, ptype), [])
         pool = self.by_type.get(ptype, [])
+        partners = self.partners.get(domain, [])
         out: list[Prog] = []
         for _ in range(n):
             if same and self.rng.random() < 0.8:
+                out.append(self.rng.choice(same))
+                continue
+            # Cross-domain edges stay inside the partner set.
+            candidates: list[Prog] = []
+            if partners:
+                for _try in range(4):
+                    pdom = self.rng.choice(partners)
+                    candidates = self.by_domain_type.get((pdom, ptype), [])
+                    if candidates:
+                        break
+            if candidates:
+                out.append(self.rng.choice(candidates))
+            elif same:
+                # No partner has a program of this type. Fall back to our own
+                # domain, NOT to the global pool -- a uniform global draw here
+                # silently rebuilds the complete coupling graph this method
+                # exists to avoid. Small domains hit this often.
                 out.append(self.rng.choice(same))
             elif pool:
                 out.append(self.rng.choice(pool))
@@ -381,18 +487,18 @@ class Topology:
             if p.ptype == "driver":
                 for t in self._pick("business", p.domain, rng.randint(2, 5)):
                     p.calls.append(Call(t.name, KIND_LINK))
+                # Menu-to-menu transfers go through _pick like everything else:
+                # a uniform draw over all drivers was the last source of
+                # complete, uniform domain coupling.
                 if rng.random() < 0.35:
-                    others = [d for d in self.by_type["driver"] if d.name != p.name]
-                    if others:
-                        p.calls.append(Call(rng.choice(others).name, KIND_XCTL))
+                    for t in self._pick("driver", p.domain, 1):
+                        if t.name != p.name:
+                            p.calls.append(Call(t.name, KIND_XCTL))
                 if rng.random() < 0.25:
-                    others = [
-                        d for d in self.by_type["driver"]
-                        if d.name != p.name and d.transid
-                    ]
-                    if others:
-                        t = rng.choice(others)
-                        p.calls.append(Call(t.name, KIND_START, transid=t.transid))
+                    for t in self._pick("driver", p.domain, 1):
+                        if t.name != p.name and t.transid:
+                            p.calls.append(
+                                Call(t.name, KIND_START, transid=t.transid))
             elif p.ptype == "business":
                 for t in self._pick("data_db2", p.domain, rng.randint(1, 3)):
                     p.calls.append(Call(t.name, KIND_LINK))
@@ -429,11 +535,31 @@ class Topology:
         for u in utils:
             u.tags.append("hub")
 
+    def _free_subs_by_domain(self) -> list[list[Prog]]:
+        """Free subroutines grouped by domain, largest group first.
+
+        Chains and rings are built inside one domain. Drawing them from a
+        globally shuffled list makes a single chain hop across twenty
+        subsystems, which no real estate does and which quietly inflates the
+        domain-coupling graph that clustering is scored against.
+        """
+        groups: dict[str, list[Prog]] = {}
+        for p in self.by_type.get("subroutine", []):
+            if not p.calls:
+                groups.setdefault(p.domain, []).append(p)
+        for g in groups.values():
+            self.rng.shuffle(g)
+        return sorted(groups.values(), key=len, reverse=True)
+
     def _inject_chains(self) -> None:
         """Long linear chains to test traversal depth beyond the layer count."""
-        subs = [p for p in self.by_type.get("subroutine", []) if not p.calls]
-        self.rng.shuffle(subs)
+        groups = self._free_subs_by_domain()
         depth = max(2, self.cfg.chain_depth)
+        # Flatten domain-by-domain so each chain's slice never straddles two.
+        subs: list[Prog] = []
+        for g in groups:
+            usable = (len(g) // depth) * depth
+            subs.extend(g[:usable])
         want = self.cfg.chains
         if want * depth > len(subs):
             want = len(subs) // depth
@@ -463,18 +589,29 @@ class Topology:
         # Chain members are off limits: a back-edge onto a chain would fuse
         # every injected ring into one giant SCC instead of N small ones.
         chain_tags = {"chain", "chain-head", "chain-tail"}
-        subs = [
-            p for p in self.by_type.get("subroutine", [])
-            if not chain_tags.intersection(p.tags)
-        ]
-        self.rng.shuffle(subs)
-        idx = 0
+        # Rings stay inside one domain, for the same reason chains do.
+        groups: dict[str, list[Prog]] = {}
+        for p in self.by_type.get("subroutine", []):
+            if chain_tags.intersection(p.tags):
+                continue
+            groups.setdefault(p.domain, []).append(p)
+        for g in groups.values():
+            self.rng.shuffle(g)
+        pools = sorted(groups.values(), key=len, reverse=True)
+        cursor = 0
         for _ in range(self.cfg.cycles):
             size = self.rng.choice([1, 2, 2, 3, 4])
-            if idx + size > len(subs):
+            # Round-robin across domains, so rings spread over the estate
+            # instead of piling into whichever domain happens to be largest.
+            ring: list[Prog] = []
+            for _probe in range(len(pools) or 1):
+                pool = pools[cursor % len(pools)] if pools else []
+                cursor += 1
+                if len(pool) >= size:
+                    ring = [pool.pop() for _ in range(size)]
+                    break
+            if not ring:
                 break
-            ring = subs[idx: idx + size]
-            idx += size
             if size == 1:
                 ring[0].calls.append(Call(ring[0].name, KIND_CALL))
                 ring[0].tags.append("recursive")
@@ -1518,6 +1655,51 @@ def graph_metrics(topo: Topology) -> dict:
         for cb in p.copybooks:
             cb_fan_in[cb] = cb_fan_in.get(cb, 0) + 1
 
+    # Domain coupling, reported twice: with and without edges into a shared
+    # utility. Hub edges are legitimately dense -- an error-logging module
+    # called from everywhere is the LGSTSQ pattern -- but they are
+    # infrastructure, not subsystem coupling, and mixing them in makes the
+    # coupling graph look complete. A tool worth its salt separates them.
+    hub_set = set(getattr(topo, "hubs", []))
+    dom_of = {p.name: p.domain for p in topo.order}
+    dom_size: dict[str, int] = {}
+    for p in topo.order:
+        dom_size[p.domain] = dom_size.get(p.domain, 0) + 1
+    pairs_all: dict[str, int] = {}
+    pairs_biz: dict[str, int] = {}
+    intra = inter = 0
+    for p in topo.order:
+        for c in p.calls:
+            target_dom = dom_of.get(c.target)
+            if target_dom is None:
+                continue
+            if target_dom == p.domain:
+                intra += 1
+                continue
+            inter += 1
+            key = "|".join(sorted((p.domain, target_dom)))
+            pairs_all[key] = pairs_all.get(key, 0) + 1
+            if c.target not in hub_set:
+                pairs_biz[key] = pairs_biz.get(key, 0) + 1
+    n_dom = len(dom_size)
+    possible = n_dom * (n_dom - 1) // 2 or 1
+    coupling = {
+        "domains": n_dom,
+        "domain_sizes": dict(sorted(dom_size.items(), key=lambda kv: -kv[1])),
+        "intra_domain_edges": intra,
+        "inter_domain_edges": inter,
+        "possible_domain_pairs": possible,
+        "connected_pairs_all": len(pairs_all),
+        "connected_pairs_excluding_hubs": len(pairs_biz),
+        "density_all": round(len(pairs_all) / possible, 4),
+        "density_excluding_hubs": round(len(pairs_biz) / possible, 4),
+        "pair_weights_excluding_hubs": dict(
+            sorted(pairs_biz.items(), key=lambda kv: -kv[1])),
+        "note": "density_all is inflated by shared utilities, which every "
+                "domain calls by design. Score subsystem coupling against "
+                "density_excluding_hubs; the hub list is injected.hubs.",
+    }
+
     resolvable = sum(n for k, n in edge_kinds.items() if RESOLVABLE.get(k, True))
     return {
         "nodes": len(names),
@@ -1539,6 +1721,7 @@ def graph_metrics(topo: Topology) -> dict:
             ({"copybook": k, "fan_in": v} for k, v in cb_fan_in.items()),
             key=lambda d: -d["fan_in"],
         )[:10],
+        "coupling": coupling,
     }
 
 
@@ -1562,7 +1745,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, default=20260729)
     ap.add_argument("--avg-lines", type=int, default=600,
                     help="median-ish program size; distribution is log-normal")
-    ap.add_argument("--domains", type=int, default=10)
+    ap.add_argument("--domains", type=int, default=10,
+                    help=f"business subsystems, max {len(DOMAINS)}. Scale with "
+                         "-n: ten domains at 100k programs means ten blobs of "
+                         "10.000, which no real estate looks like")
+    ap.add_argument("--partners", type=int, nargs=2, default=(2, 5),
+                    metavar=("MIN", "MAX"),
+                    help="how many other domains each domain calls into. Keeps "
+                         "the coupling graph sparse and uneven instead of "
+                         "complete and uniform")
+    ap.add_argument("--drivers-per-mapset", type=int, default=8,
+                    help="online drivers sharing one BMS mapset")
     ap.add_argument("--copybooks-per-domain", type=int, default=12)
     ap.add_argument("--hub-density", type=float, default=0.55,
                     help="fraction of programs that LINK to a shared utility")
@@ -1655,6 +1848,7 @@ def main(argv: list[str] | None = None) -> int:
             write(os.path.join(out, "ddl", "schema.sql"), ddl(tables))
 
     metrics = graph_metrics(topo)
+    hub_names = set(getattr(topo, "hubs", []))
     manifest = {
         "config": vars(cfg),
         "totals": {
@@ -1708,6 +1902,9 @@ def main(argv: list[str] | None = None) -> int:
                         "via": c.via,
                         "transid": c.transid,
                         "statically_resolvable": RESOLVABLE.get(c.kind, True),
+                        # Infrastructure edge, not subsystem coupling. Filter
+                        # these out when scoring clustering or impact analysis.
+                        "to_hub": c.target in hub_names,
                     }
                     for c in p.calls
                 ],

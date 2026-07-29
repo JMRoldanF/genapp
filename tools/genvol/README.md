@@ -36,7 +36,9 @@ Useful flags:
 |---|---|---|
 | `-n, --programs` | 2000 | program count (pathological cases are added on top) |
 | `--avg-lines` | 600 | size centre; distribution is log-normal, so expect a long tail |
-| `--domains` | 10 | business domains, which drive naming and clustering |
+| `--domains` | 10 | business subsystems, max 60. **Scale with `-n`** — ten domains at 100k programs means ten blobs of 10.000 |
+| `--partners` | 2 5 | how many other domains each domain calls into, keeping coupling sparse and uneven |
+| `--drivers-per-mapset` | 8 | online drivers sharing one BMS mapset |
 | `--hub-density` | 0.55 | share of programs that LINK to a shared utility |
 | `--hubs` | 6 | number of high-fan-in utilities. Deliberately does **not** scale with `-n`: a proportional share would give 200 middling "hubs" at 100k programs instead of a few real ones |
 | `--dynamic-rate` | 0.12 | share of edges rewritten as dynamic dispatch |
@@ -177,6 +179,32 @@ python3 tools/genvol/genvol.py -n 5000 --boundary 12 \
 Drop the flag once the fallback exists and the over-window cases come back —
 the giant returns to ~20.000 lines and the 1.02×/1.15×/1.5×/2.0× cohort
 reappears, which is what exercises the routing decision itself.
+
+## Domain coupling
+
+Cross-domain edges are restricted to a small per-domain **partner set**, and
+domain sizes follow a long tail rather than being equal. Without both, choosing
+cross-domain targets uniformly produces a *complete* coupling graph with uniform
+weights — every domain pair connected, all about equally — which carries no
+signal: community detection recovers the blocks trivially and impact analysis
+answers "everything, equally" for any change. Long chains and recursion rings are
+also built inside a single domain, since a chain hopping across twenty subsystems
+is not a thing real estates do.
+
+Measured on a 3.000-program, 30-domain run:
+
+| | uniform (old) | partner sets |
+|---|---|---|
+| connected domain pairs | 45/45 (100%) | 117/435 (27%) |
+| heaviest : lightest pair | 2× | 24× |
+| domain size spread | 1× | 9× |
+
+`expected_graph.coupling` in the manifest reports this both ways, and every edge
+carries a `to_hub` flag. **Score subsystem coupling against
+`density_excluding_hubs`.** Hub edges are legitimately dense — a shared
+error-logging module called from everywhere is the `LGSTSQ` pattern — but they
+are infrastructure, not coupling. Whether a tool tells the two apart is itself
+worth measuring.
 
 ## Hostile cases
 
