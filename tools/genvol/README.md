@@ -206,6 +206,17 @@ error-logging module called from everywhere is the `LGSTSQ` pattern — but they
 are infrastructure, not coupling. Whether a tool tells the two apart is itself
 worth measuring.
 
+## BMS caveat
+
+Generated mapsets mark continued statements with `X` in **column 72**, as HLASM
+requires and as the reference `ssmap.bms` does. Field names deliberately avoid
+assembler instruction mnemonics, except in one labelled mapset,
+`bms/ZZMNEMON.bms`, whose fields are named `TITLE`, `START`, `END`, `COPY`,
+`EQU`, `USING`, `SPACE`, `PRINT` — all valid in the name field (column 1), all
+mis-read by a lexer that matches keywords by token rather than by column
+position. It is recorded in `injected.bms_mnemonic_collision`, so a finding there
+is a real one rather than an artifact.
+
 ## Hostile cases
 
 One program each, tagged in the manifest: 120-level `IF` nesting; `GO TO

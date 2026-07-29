@@ -1446,18 +1446,61 @@ class Emitter:
 # ---------------------------------------------------------------------------
 
 
+def _bms_cont(line: str) -> str:
+    """Mark an assembler statement as continued: non-blank in column 72.
+
+    HLASM requires this; without it a statement whose operands run onto the next
+    line is a syntax error. The reference ssmap.bms puts an X there.
+    """
+    if len(line) >= 71:
+        line = line[:71]
+    return f"{line:<71}X"
+
+
 def bms_mapset(name: str) -> str:
     L = [
-        f"{name:<9}DFHMSD TYPE=&SYSPARM,MODE=INOUT,CTRL=(FREEKB,FRSET),",
+        _bms_cont(f"{name:<9}DFHMSD TYPE=MAP,MODE=INOUT,CTRL=(FREEKB,FRSET),"),
         "               LANG=COBOL,STORAGE=AUTO,TIOAPFX=YES",
         f"{name[:7]}I DFHMDI SIZE=(24,80)",
-        "         DFHMDF POS=(1,1),LENGTH=20,ATTRB=(PROT),",
+        _bms_cont("         DFHMDF POS=(1,1),LENGTH=20,ATTRB=(PROT),"),
         "               INITIAL='GENERATED VOLUME TEST'",
-        "TITLE    DFHMDF POS=(3,1),LENGTH=40,ATTRB=(PROT)",
+        # Deliberately NOT named TITLE. TITLE is an HLASM instruction, so a
+        # lexer that matches keywords without regard to column position
+        # mis-reads it -- a real bug class, but one the reference application
+        # never triggers, which makes it an accidental trap rather than a
+        # documented test. See the mnemonic-collision mapset below for the
+        # labelled version.
+        "HDRTTL   DFHMDF POS=(3,1),LENGTH=40,ATTRB=(PROT)",
         "CUSTNO   DFHMDF POS=(5,20),LENGTH=10,ATTRB=(UNPROT,IC)",
         "POLNO    DFHMDF POS=(6,20),LENGTH=10,ATTRB=(UNPROT)",
         "PREMIUM  DFHMDF POS=(7,20),LENGTH=9,ATTRB=(UNPROT)",
         "ERRMSG   DFHMDF POS=(23,1),LENGTH=70,ATTRB=(PROT,BRT)",
+        "         DFHMSD TYPE=FINAL",
+        "         END",
+    ]
+    return "\n".join(L) + "\n"
+
+
+def bms_mnemonic_collision(name: str) -> str:
+    """A mapset whose field names collide with HLASM instruction mnemonics.
+
+    Field names live in the name field (column 1); the operation field follows.
+    A lexer that recognises keywords by token match rather than by column
+    position will mis-read every one of these. Real shops do produce names like
+    this, so it is worth testing -- but as a labelled case, not by accident.
+    """
+    L = [
+        _bms_cont(f"{name:<9}DFHMSD TYPE=MAP,MODE=INOUT,CTRL=(FREEKB,FRSET),"),
+        "               LANG=COBOL,STORAGE=AUTO,TIOAPFX=YES",
+        f"{name[:7]}I DFHMDI SIZE=(24,80)",
+        "TITLE    DFHMDF POS=(1,1),LENGTH=20,ATTRB=(PROT)",
+        "START    DFHMDF POS=(2,1),LENGTH=10,ATTRB=(UNPROT)",
+        "END      DFHMDF POS=(3,1),LENGTH=10,ATTRB=(UNPROT)",
+        "COPY     DFHMDF POS=(4,1),LENGTH=10,ATTRB=(UNPROT)",
+        "EQU      DFHMDF POS=(5,1),LENGTH=10,ATTRB=(UNPROT)",
+        "USING    DFHMDF POS=(6,1),LENGTH=10,ATTRB=(UNPROT)",
+        "SPACE    DFHMDF POS=(7,1),LENGTH=10,ATTRB=(UNPROT)",
+        "PRINT    DFHMDF POS=(8,1),LENGTH=10,ATTRB=(UNPROT)",
         "         DFHMSD TYPE=FINAL",
         "         END",
     ]
@@ -1832,10 +1875,13 @@ def main(argv: list[str] | None = None) -> int:
         write(os.path.join(out, "src/attic", f"{p.name}.cbl"), body)
 
     if not cfg.no_artefacts:
-        for p in topo.order:
-            if p.mapset:
-                write(os.path.join(out, "bms", f"{p.mapset}.bms"),
-                      bms_mapset(p.mapset))
+        mapsets = sorted({p.mapset for p in topo.order if p.mapset})
+        for ms in mapsets:
+            write(os.path.join(out, "bms", f"{ms}.bms"), bms_mapset(ms))
+        if mapsets and cfg.pathological:
+            # One labelled mnemonic-collision mapset, recorded in the manifest.
+            write(os.path.join(out, "bms", "ZZMNEMON.bms"),
+                  bms_mnemonic_collision("ZZMNEMON"))
         for j in topo.jobs:
             steps = [
                 (st["step"], st["program"], st["dd_names"]) for st in j["steps"]
@@ -1866,6 +1912,10 @@ def main(argv: list[str] | None = None) -> int:
             "hubs": getattr(topo, "hubs", []),
             "pathological": getattr(topo, "pathological", []),
             "boundary": getattr(topo, "boundary", []),
+            "bms_mnemonic_collision": (
+                "bms/ZZMNEMON.bms" if not cfg.no_artefacts and cfg.pathological
+                else None
+            ),
         },
         "window_cap": {
             "applied": bool(topo.window_budget_chars),
