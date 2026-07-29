@@ -112,6 +112,30 @@ windows — the 1.5× and 2.0× entries then also bracket a window up to twice t
 size. Tokenizers differ between providers, so measure `--chars-per-token` per
 model rather than reusing one figure.
 
+### Measuring the ratio — not optional
+
+`measure_ratio.py` measures it against a corpus you already generated:
+
+```sh
+python3 tools/genvol/measure_ratio.py /path/to/corpus --model claude-haiku-4-5
+python3 tools/genvol/measure_ratio.py /path/to/corpus --dry-run   # no API calls
+```
+
+It counts the largest programs exactly — that is where overflow risk lives —
+plus a spread across the size range, and counts each program **together with its
+copybook closure**, since that is what a tool actually hands the model.
+
+The statistic that matters is the **minimum** ratio, not the mean: a lower ratio
+means more tokens per character, so the budget has to come from the worst case.
+An average that looks comfortable still hides the files that overflow.
+
+Why it matters concretely: at a 200.000-token window with a 15% reserve, the
+largest file in a `--chars-per-token 3.4` corpus needs a real ratio of at least
+**3,23** to fit — under 5% of margin. If the real ratio is lower, the `0.95×`
+boundary programs move from just-inside to just-outside while the manifest still
+reports `fits_window: true`. That corrupts the ground truth precisely in the
+cases meant to exercise a routing decision.
+
 ### Keeping the whole corpus inside one window
 
 Until there is a fallback path for over-window files, `--fit-window` caps every
