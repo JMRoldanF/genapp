@@ -217,6 +217,17 @@ mis-read by a lexer that matches keywords by token rather than by column
 position. It is recorded in `injected.bms_mnemonic_collision`, so a finding there
 is a real one rather than an artifact.
 
+`bms/ZZAMPERS.bms` covers the other ampersand hazard, recorded in
+`injected.bms_ampersand`. In HLASM, `&SYSPARM` is a **variable symbol** (a single
+ampersand) while `&&` is an escape for a literal ampersand and *only* inside a
+quoted string — so `INITIAL='PROFIT && LOSS ACCOUNT'` renders one ampersand.
+
+Generated JCL carries both ampersand forms, because they are different
+constructs rather than escaped and unescaped spellings of one: `&SYSUID` and
+`&MEM` are symbolic parameters, while `&&WORK` and `&&SORTWK` are **temporary
+datasets**. A parser can get one right and the other wrong, so emitting only
+`&SYSUID` let a tool pass this corpus and still break on real JCL.
+
 ## Hostile cases
 
 One program each, tagged in the manifest: 120-level `IF` nesting; `GO TO

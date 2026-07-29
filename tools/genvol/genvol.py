@@ -1508,22 +1508,60 @@ def bms_mnemonic_collision(name: str) -> str:
 
 
 def jcl_job(job: str, steps: list[tuple[str, str, list[str]]]) -> str:
+    # Both ampersand forms appear, because they are different constructs and a
+    # parser can get one right while getting the other wrong:
+    #   &NAME   symbolic parameter / system symbol  (&SYSUID, &MEM)
+    #   &&NAME  temporary dataset                  (&&LOADSET)
+    # The reference cobol.jcl uses both; emitting only &SYSUID let a parser
+    # pass this corpus and still break on real JCL.
     L = [
         f"//{job:<8} JOB (ACCT),'VOLUME TEST',CLASS=A,MSGCLASS=H,",
         "//         NOTIFY=&SYSUID,REGION=0M",
         "//*",
         "//* Generated volume-test JCL",
         "//*",
+        "//RUNPROC  PROC MEM=DEFAULT",
+        "//*",
     ]
     for step, pgm, dds in steps:
         L.append(f"//{step:<8} EXEC PGM={pgm}")
         L.append("//STEPLIB  DD DISP=SHR,DSN=GENAPP.LOADLIB")
+        L.append("//SYSIN    DD DISP=SHR,DSN=GENAPP.PARMLIB(&MEM)")
         for dd in dds:
             L.append(f"//{dd:<8} DD DISP=SHR,DSN=GENAPP.{dd}.DATA")
+        L.append("//WORKDS   DD DSN=&&WORK,DISP=(NEW,PASS),UNIT=SYSDA,")
+        L.append("//            SPACE=(TRK,(20,10))")
+        L.append("//SORTWK   DD DSN=&&SORTWK,DISP=(NEW,DELETE),UNIT=SYSDA,")
+        L.append("//            SPACE=(CYL,(5,5))")
         L.append("//SYSOUT   DD SYSOUT=*")
         L.append("//SYSPRINT DD SYSOUT=*")
         L.append("//*")
+    L.append("//         PEND")
+    L.append("//RUN      EXEC RUNPROC,MEM=VOLTEST")
     L.append("//")
+    return "\n".join(L) + "\n"
+
+
+def bms_ampersand(name: str) -> str:
+    """A mapset exercising both ampersand meanings in HLASM.
+
+    `&SYSPARM` is a variable symbol -- a single ampersand, the idiomatic way a
+    BMS mapset is assembled twice (once for the map, once for the DSECT). `&&`
+    is an escape for a literal ampersand, and *only* inside a quoted string.
+    A lexer that requires `&&` everywhere misreads the first; one that never
+    handles `&&` misreads the second.
+    """
+    L = [
+        _bms_cont(f"{name:<9}DFHMSD TYPE=&SYSPARM,MODE=INOUT,"
+                  "CTRL=(FREEKB,FRSET),"),
+        "               LANG=COBOL,STORAGE=AUTO,TIOAPFX=YES",
+        f"{name[:7]}I DFHMDI SIZE=(24,80)",
+        _bms_cont("AMPLIT   DFHMDF POS=(1,1),LENGTH=30,ATTRB=(PROT),"),
+        "               INITIAL='PROFIT && LOSS ACCOUNT'",
+        "VARSYM   DFHMDF POS=(3,1),LENGTH=10,ATTRB=(UNPROT)",
+        "         DFHMSD TYPE=FINAL",
+        "         END",
+    ]
     return "\n".join(L) + "\n"
 
 
@@ -1879,9 +1917,11 @@ def main(argv: list[str] | None = None) -> int:
         for ms in mapsets:
             write(os.path.join(out, "bms", f"{ms}.bms"), bms_mapset(ms))
         if mapsets and cfg.pathological:
-            # One labelled mnemonic-collision mapset, recorded in the manifest.
+            # Labelled lexer-hazard mapsets, both recorded in the manifest.
             write(os.path.join(out, "bms", "ZZMNEMON.bms"),
                   bms_mnemonic_collision("ZZMNEMON"))
+            write(os.path.join(out, "bms", "ZZAMPERS.bms"),
+                  bms_ampersand("ZZAMPERS"))
         for j in topo.jobs:
             steps = [
                 (st["step"], st["program"], st["dd_names"]) for st in j["steps"]
@@ -1914,6 +1954,10 @@ def main(argv: list[str] | None = None) -> int:
             "boundary": getattr(topo, "boundary", []),
             "bms_mnemonic_collision": (
                 "bms/ZZMNEMON.bms" if not cfg.no_artefacts and cfg.pathological
+                else None
+            ),
+            "bms_ampersand": (
+                "bms/ZZAMPERS.bms" if not cfg.no_artefacts and cfg.pathological
                 else None
             ),
         },
