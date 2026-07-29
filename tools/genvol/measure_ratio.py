@@ -15,9 +15,15 @@ gets measured -- not the .cbl alone.
 
     python3 measure_ratio.py /path/to/corpus --model claude-haiku-4-5
 
-Needs credentials (ANTHROPIC_API_KEY, or an `ant auth login` profile) and the
-`anthropic` SDK. Use --dry-run to inspect the sample selection without calling
-the API.
+    # via Amazon Bedrock, using an existing AWS session
+    python3 measure_ratio.py /path/to/corpus --provider bedrock \
+        --aws-region eu-north-1 --model claude-haiku-4-5
+
+Needs the `anthropic` SDK and credentials: ANTHROPIC_API_KEY or an
+`ant auth login` profile for `--provider api`; an AWS session for
+`--provider bedrock` (which additionally requires that the account has been
+granted access to the model) or `--provider aws`. Use --dry-run to inspect the
+sample selection without calling anything.
 """
 
 from __future__ import annotations
@@ -60,7 +66,7 @@ def copybook_closure(manifest: dict) -> dict[str, list[str]]:
     return resolved
 
 
-def payload_for(corpus: str, prog: dict, manifest: dict,
+def payload_for(corpus: str, prog: dict,
                 closure: dict[str, list[str]],
                 cb_path: dict[str, str]) -> str:
     """The text a tool would actually hand the model: program + its copybooks."""
@@ -106,6 +112,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--reserve", type=float, default=-1.0,
                     help="share held back for prompt and output; default reads "
                          "it from the manifest")
+    ap.add_argument("--provider", choices=("api", "bedrock", "aws"), default="api",
+                    help="api: first-party Claude API. bedrock: Amazon Bedrock "
+                         "(model IDs get an 'anthropic.' prefix). aws: Claude "
+                         "Platform on AWS (needs --aws-workspace-id)")
+    ap.add_argument("--aws-region", default=os.environ.get("AWS_REGION"),
+                    help="required for --provider bedrock/aws")
+    ap.add_argument("--aws-workspace-id",
+                    default=os.environ.get("ANTHROPIC_AWS_WORKSPACE_ID"),
+                    help="required for --provider aws")
     ap.add_argument("--dry-run", action="store_true",
                     help="show the sample selection without calling the API")
     cfg = ap.parse_args(argv)
@@ -134,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.dry_run:
         print(f"{'program':<10} {'lines':>8} {'payload chars':>14}")
         for p in sample:
-            n = len(payload_for(cfg.corpus, p, manifest, closure, cb_path))
+            n = len(payload_for(cfg.corpus, p, closure, cb_path))
             print(f"{p['name']:<10} {p['lines']:>8,} {n:>14,}")
         print("\n--dry-run: no API calls made")
         return 0
@@ -142,19 +157,41 @@ def main(argv: list[str] | None = None) -> int:
     try:
         import anthropic
     except ImportError:
-        sys.exit("pip install anthropic")
+        extra = {"bedrock": "[bedrock]", "aws": "[aws]"}.get(cfg.provider, "")
+        sys.exit(f'pip install "anthropic{extra}"')
 
-    client = anthropic.Anthropic()
+    model = cfg.model
+    if cfg.provider == "bedrock":
+        if not cfg.aws_region:
+            sys.exit("--provider bedrock needs --aws-region (or AWS_REGION)")
+        # Bedrock model IDs carry an 'anthropic.' prefix. Note the Messages-API
+        # endpoint wants the bare prefixed form: dated/versioned IDs such as
+        # anthropic.claude-haiku-4-5-20251001-v1:0 return 404 there, even though
+        # `aws bedrock list-foundation-models` lists them.
+        if not model.startswith("anthropic."):
+            model = "anthropic." + model
+        client = anthropic.AnthropicBedrockMantle(aws_region=cfg.aws_region)
+    elif cfg.provider == "aws":
+        if not cfg.aws_region:
+            sys.exit("--provider aws needs --aws-region (or AWS_REGION)")
+        if not cfg.aws_workspace_id:
+            sys.exit("--provider aws needs --aws-workspace-id "
+                     "(or ANTHROPIC_AWS_WORKSPACE_ID)")
+        client = anthropic.AnthropicAWS(aws_region=cfg.aws_region,
+                                        workspace_id=cfg.aws_workspace_id)
+    else:
+        client = anthropic.Anthropic()
+
     rows = []
     for i, p in enumerate(sample, 1):
-        text = payload_for(cfg.corpus, p, manifest, closure, cb_path)
+        text = payload_for(cfg.corpus, p, closure, cb_path)
         try:
             tokens = client.messages.count_tokens(
-                model=cfg.model,
+                model=model,
                 messages=[{"role": "user", "content": text}],
             ).input_tokens
         except Exception as exc:                      # noqa: BLE001
-            sys.exit(f"count_tokens failed on {p['name']}: {exc}")
+            sys.exit(f"count_tokens failed on {p['name']} ({model}): {exc}")
         rows.append((p["name"], p["lines"], len(text), tokens, len(text) / tokens))
         print(f"\r  {i}/{len(sample)}", end="", file=sys.stderr)
     print("\r" + " " * 20 + "\r", end="", file=sys.stderr)

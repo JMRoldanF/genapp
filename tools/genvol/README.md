@@ -119,7 +119,19 @@ model rather than reusing one figure.
 ```sh
 python3 tools/genvol/measure_ratio.py /path/to/corpus --model claude-haiku-4-5
 python3 tools/genvol/measure_ratio.py /path/to/corpus --dry-run   # no API calls
+
+# through an existing AWS session instead of an API key
+python3 tools/genvol/measure_ratio.py /path/to/corpus --provider bedrock \
+    --aws-region eu-north-1 --model claude-haiku-4-5
 ```
+
+`--provider bedrock` needs `pip install "anthropic[bedrock]" "botocore[crt]"` and
+an account that has been **granted access to the model** — a valid AWS session is
+not enough on its own, and a missing grant surfaces as
+`403 … is not available for this account`. Bedrock's Messages-API endpoint also
+wants the bare prefixed ID (`anthropic.claude-haiku-4-5`); the dated form that
+`aws bedrock list-foundation-models` prints returns 404 there. The script adds
+the prefix for you.
 
 It counts the largest programs exactly — that is where overflow risk lives —
 plus a spread across the size range, and counts each program **together with its
