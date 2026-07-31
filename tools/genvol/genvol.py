@@ -1446,39 +1446,246 @@ class Emitter:
 # ---------------------------------------------------------------------------
 
 
-def _bms_cont(line: str) -> str:
+# HLASM fixed format, which is not COBOL's:
+#   cols 1-71   name, operation, operands, remark
+#   col  72     continuation indicator -- ANY non-blank means "continued"
+#   cols 73-80  sequence area, ignored by the assembler
+# A continued statement resumes in the continue column, column 16.
+BMS_CONT_COL = 72
+BMS_CONTINUE_COL = 16
+
+
+def _bms_cont(line: str, marker: str = "X") -> str:
     """Mark an assembler statement as continued: non-blank in column 72.
 
     HLASM requires this; without it a statement whose operands run onto the next
-    line is a syntax error. The reference ssmap.bms puts an X there.
+    line is a syntax error. Any non-blank character serves -- the reference
+    ssmap.bms uses X, and real shops also use *, C, - and digits -- so the
+    marker is a parameter, not a constant. A corpus that only ever emits X
+    tests the parser's handling of X.
     """
-    if len(line) >= 71:
-        line = line[:71]
-    return f"{line:<71}X"
+    if len(line) >= BMS_CONT_COL - 1:
+        line = line[:BMS_CONT_COL - 1]
+    return f"{line:<{BMS_CONT_COL - 1}}{marker}"
 
 
-def bms_mapset(name: str) -> str:
-    L = [
-        _bms_cont(f"{name:<9}DFHMSD TYPE=MAP,MODE=INOUT,CTRL=(FREEKB,FRSET),"),
-        "               LANG=COBOL,STORAGE=AUTO,TIOAPFX=YES",
-        f"{name[:7]}I DFHMDI SIZE=(24,80)",
-        _bms_cont("         DFHMDF POS=(1,1),LENGTH=20,ATTRB=(PROT),"),
-        "               INITIAL='GENERATED VOLUME TEST'",
-        # Deliberately NOT named TITLE. TITLE is an HLASM instruction, so a
-        # lexer that matches keywords without regard to column position
-        # mis-reads it -- a real bug class, but one the reference application
-        # never triggers, which makes it an accidental trap rather than a
-        # documented test. See the mnemonic-collision mapset below for the
-        # labelled version.
-        "HDRTTL   DFHMDF POS=(3,1),LENGTH=40,ATTRB=(PROT)",
-        "CUSTNO   DFHMDF POS=(5,20),LENGTH=10,ATTRB=(UNPROT,IC)",
-        "POLNO    DFHMDF POS=(6,20),LENGTH=10,ATTRB=(UNPROT)",
-        "PREMIUM  DFHMDF POS=(7,20),LENGTH=9,ATTRB=(UNPROT)",
-        "ERRMSG   DFHMDF POS=(23,1),LENGTH=70,ATTRB=(PROT,BRT)",
-        "         DFHMSD TYPE=FINAL",
-        "         END",
-    ]
-    return "\n".join(L) + "\n"
+def _bms_wrap_literal(head: str, literal: str, marker: str = "X",
+                      resume: int = BMS_CONTINUE_COL) -> list[str]:
+    """Emit a quoted literal that spans records, filling each one to column 71.
+
+    Columns `resume`..71 of a continued record are literal content, blanks
+    included, so filling to 71 is not cosmetic: it is the only way to continue a
+    literal without injecting blanks into it. It also puts a real character of
+    the string in column 71, hard against the marker in column 72 -- which is
+    the shape that catches a reader slicing the record at 72 instead of 71.
+    """
+    out: list[str] = []
+    body = literal + "'"
+    room = (BMS_CONT_COL - 1) - len(head)
+    cur, body = head + body[:room], body[room:]
+    while body:
+        out.append(_bms_cont(cur, marker))
+        room = BMS_CONT_COL - resume
+        cur, body = " " * (resume - 1) + body[:room], body[room:]
+    out.append(cur)
+    return out
+
+
+def _bms_literal_field(label: str, operands: str,
+                       pieces: list[tuple[int, str]],
+                       marker: str = "X") -> tuple[list[str], str]:
+    """Build a DFHMDF whose INITIAL literal spans records, and return both the
+    records and the string HLASM actually assembles from them.
+
+    `pieces` is (resume column, text) per record; the first entry's column is
+    the natural one after `INITIAL='`. The value is read back off the emitted
+    records rather than reassembled from the inputs, so what the manifest
+    promises is what the file contains.
+    """
+    head = f"{label:<9}DFHMDF {operands},INITIAL='{pieces[0][1]}"
+    recs = [_bms_cont(head, marker)]
+    for col, text in pieces[1:-1]:
+        recs.append(_bms_cont(" " * (col - 1) + text, marker))
+    col, text = pieces[-1]
+    recs.append(" " * (col - 1) + text + "'")
+
+    # Head record from just past the opening quote through column 71, then
+    # columns 16..71 of every continued record, then the tail up to the closing
+    # quote. Every blank in those ranges is content, padding included.
+    quote = head.index("INITIAL='") + len("INITIAL='")
+    value = recs[0][quote:BMS_CONT_COL - 1]
+    for rec in recs[1:-1]:
+        value += rec[BMS_CONTINUE_COL - 1:BMS_CONT_COL - 1]
+    value += recs[-1][BMS_CONTINUE_COL - 1:-1]
+    return recs, value
+
+
+def _bms_seqnums(records: list[str], rng: random.Random,
+                 share: float) -> list[str]:
+    """Number `share` of the records in columns 73-80.
+
+    The assembler ignores 73-80, which is exactly what makes them a hazard: a
+    reader that slices a record at 80 takes them for content, and a reader that
+    assumes every record stops at 72 has never met a file that has them. Real
+    exports number some records and not others -- an edited line loses its
+    number -- so this is deliberately intermittent within one file.
+    """
+    out = []
+    seq = 0
+    for rec in records:
+        seq += 10
+        if rec.strip() and rng.random() < share:
+            out.append(f"{rec:<{BMS_CONT_COL}}{seq:08d}")
+        else:
+            out.append(rec)
+    return out
+
+
+def bms_mapset(name: str, rng: random.Random) -> tuple[str, list[str]]:
+    """One mapset for the bulk corpus, varied per name.
+
+    Everything emitted here is valid BMS. What varies is what a fixed template
+    never moves: the character in column 72, whether records carry a sequence
+    number in 73-80, where a continuation resumes, whether comment banners and
+    remarks are present, whether the literal runs hard against column 71,
+    whether TYPE=FINAL carries a name. Thousands of byte-identical mapsets
+    measure a parser against one template, not against BMS.
+
+    Returns the text and the features used, so the manifest can report the
+    actual mix rather than assert an intended one.
+    """
+    feat: list[str] = []
+    L: list[str] = []
+
+    r = rng.random()
+    if r < 0.62:
+        marker = "X"
+    elif r < 0.85:
+        marker = "*"
+        feat.append("marker_star")
+    else:
+        marker = rng.choice("CY-1")
+        feat.append("marker_other")
+
+    if rng.random() < 0.55:
+        L += ["*" * 71,
+              f"* {name} -- generated volume-test mapset",
+              "*" * 71]
+        feat.append("comment_banner")
+    if rng.random() < 0.25:
+        L.append(f"{name:<9}TITLE '{name} SCREEN LAYOUT'")
+        feat.append("title_with_name")
+    if rng.random() < 0.30:
+        L.append("         PRINT NOGEN")
+        feat.append("print_nogen")
+
+    msd = f"{name:<9}DFHMSD TYPE=MAP,MODE=INOUT,CTRL=(FREEKB,FRSET),"
+    if rng.random() < 0.30:
+        # A value with a hyphen in it. Nothing exotic, but an operand lexer
+        # that treats - as arithmetic splits the terminal type in two.
+        msd += "TERM=3270-2,"
+        feat.append("term_hyphen")
+    if len(msd) + 12 <= BMS_CONT_COL - 1 and rng.random() < 0.18:
+        # The operand list ends at the trailing comma; what follows through
+        # column 71 is a remark, and column 72 still continues the statement.
+        msd = f"{msd:<58}map header"
+        feat.append("remark_on_continued")
+    L.append(_bms_cont(msd, marker))
+    L.append("               LANG=COBOL,STORAGE=AUTO,TIOAPFX=YES")
+
+    if rng.random() < 0.22:
+        L.append("         EJECT")
+        feat.append("eject")
+    elif rng.random() < 0.28:
+        L.append(f"         SPACE {rng.randint(1, 3)}")
+        feat.append("space")
+
+    L.append(f"{name[:7]}I DFHMDI SIZE=(24,80)")
+
+    # The header literal is the one that spans records. Lower case inside a
+    # literal is real and frequent -- outside one it would be invalid.
+    operands = "POS=(1,1),LENGTH=60,ATTRB=(PROT)"
+    if rng.random() < 0.22:
+        # Late resumption, legal here *because* it is inside a quoted literal:
+        # columns 16..71 are content, so the blanks ahead of the resumption
+        # point belong to the string. That is also why it only makes sense for
+        # a literal whose gap is wanted -- a two-part heading -- and never mid
+        # word. Outside a literal a late resumption is a different thing
+        # entirely, and is a labelled case in bms_transfer_damage().
+        resume = rng.choice([17, 19, 37])
+        left, right = rng.choice([
+            ("CUSTOMER POLICY ENQUIRY", "GENAPP VOLUME TEST"),
+            ("POLICY DETAIL", "Page 1 of 1"),
+            ("BROKER ENQUIRY", "PF3 Exit"),
+        ])
+        headline = f"{left} {right}"
+        recs, _ = _bms_literal_field(
+            "", operands, [(0, left), (resume, right)], marker)
+        L += recs
+        feat.append("late_resume_in_literal")
+    else:
+        headline = rng.choice([
+            "GENERATED VOLUME TEST",
+            "Press PF9 for the previous screen, PF3 to exit",
+            "CUSTOMER POLICY ENQUIRY -- ALL AMOUNTS IN GBP",
+            "Enter a customer number and press Enter to continue",
+        ])
+        L += _bms_wrap_literal(
+            f"         DFHMDF {operands},INITIAL='", headline, marker)
+    if headline != headline.upper():
+        feat.append("mixed_case_literal")
+
+    # Deliberately NOT named TITLE. TITLE is an HLASM instruction, so a lexer
+    # that matches keywords without regard to column position mis-reads it -- a
+    # real bug class, but one the reference application never triggers, which
+    # makes it an accidental trap rather than a documented test. See the
+    # mnemonic-collision mapset below for the labelled version.
+    for label, operands, remark in [
+        ("HDRTTL", "POS=(3,1),LENGTH=40,ATTRB=(PROT)", "screen title"),
+        ("CUSTNO", "POS=(5,20),LENGTH=10,ATTRB=(UNPROT,IC)", "customer number"),
+        ("POLNO", "POS=(6,20),LENGTH=10,ATTRB=(UNPROT)", "policy number"),
+        ("PREMIUM", "POS=(7,20),LENGTH=9,ATTRB=(UNPROT)", "annual premium"),
+        ("ERRMSG", "POS=(23,1),LENGTH=70,ATTRB=(PROT,BRT)", "error line"),
+    ]:
+        rec = f"{label:<9}DFHMDF {operands}"
+        if rng.random() < 0.18:
+            rec = f"{rec:<56}{remark}"[:BMS_CONT_COL - 1]
+            feat.append("remark_after_operands")
+        L.append(rec)
+
+    final = "         DFHMSD TYPE=FINAL"
+    if rng.random() < 0.35:
+        # TYPE=FINAL takes a name like any other statement. Dropping the name
+        # everywhere teaches a parser that the trailer has none.
+        final = f"{name:<9}DFHMSD TYPE=FINAL"
+        feat.append("named_final")
+    L.append(final)
+    L.append("         END")
+
+    if rng.random() < 0.35:
+        # A wholly blank record is a no-op to HLASM, so it is legal between
+        # statements -- but only between them. A blank record straight after a
+        # column-72 marker breaks the continuation, so that one is a labelled
+        # case rather than bulk variation.
+        safe = [i for i in range(1, len(L))
+                if L[i - 1].strip() and len(L[i - 1]) < BMS_CONT_COL]
+        if safe:
+            L.insert(rng.choice(safe),
+                     "" if rng.random() < 0.5 else " " * rng.randint(1, 12))
+            feat.append("blank_record")
+
+    r = rng.random()
+    if r < 0.14:
+        L = _bms_seqnums(L, rng, 1.0)
+        feat.append("seqnums_all")
+    elif r < 0.32:
+        L = _bms_seqnums(L, rng, rng.uniform(0.3, 0.7))
+        feat.append("seqnums_partial")
+
+    if any(len(rec) >= BMS_CONT_COL and rec[BMS_CONT_COL - 2] != " "
+           for rec in L):
+        feat.append("content_to_col71")
+    return "\n".join(L) + "\n", sorted(set(feat))
 
 
 def bms_mnemonic_collision(name: str) -> str:
@@ -1563,6 +1770,129 @@ def bms_ampersand(name: str) -> str:
         "         END",
     ]
     return "\n".join(L) + "\n"
+
+
+def bms_literal_continuation(name: str) -> tuple[str, dict[str, str]]:
+    """Literals where the record boundary is itself content.
+
+    Every case here fails silently: a parser that gets one wrong drops or
+    invents literal text without raising anything, so the manifest carries the
+    exact expected string for each field.
+
+      THREEREC  a literal spanning three records. Two-record literals are
+                everywhere; three is rare enough that a parser carrying a
+                one-record lookahead passes every corpus it has ever seen.
+      LEADBLNK  content resuming in column 17, so column 16 holds a blank that
+                belongs to the string. A parser that lstrips the continuation
+                record loses it.
+      SHORTPAD  a record that stops well short of column 71. Columns 16..71 are
+                all content, so the trailing blanks are *in* the string -- which
+                is why real source fills to 71, and why a parser that rstrips
+                the continuation record builds a shorter string than HLASM.
+    """
+    expected: dict[str, str] = {}
+    L = [
+        _bms_cont(f"{name:<9}DFHMSD TYPE=MAP,MODE=INOUT,"
+                  "CTRL=(FREEKB,FRSET),"),
+        "               LANG=COBOL,STORAGE=AUTO,TIOAPFX=YES",
+        f"{name[:7]}I DFHMDI SIZE=(24,80)",
+    ]
+    for label, operands, pieces in [
+        ("THREEREC", "POS=(1,1),LENGTH=79,ATTRB=(PROT)",
+         [(0, "AAA BBB"), (16, "CCC DDD"), (16, "EEE")]),
+        ("LEADBLNK", "POS=(3,1),LENGTH=40,ATTRB=(PROT)",
+         [(0, "TOTAL:"), (17, "1.234,56")]),
+        ("SHORTPAD", "POS=(5,1),LENGTH=40,ATTRB=(PROT)",
+         [(0, "LEFT"), (16, "RIGHT")]),
+    ]:
+        recs, value = _bms_literal_field(label, operands, pieces)
+        L += recs
+        expected[label] = value
+    L.append("         DFHMSD TYPE=FINAL")
+    L.append("         END")
+    return "\n".join(L) + "\n", expected
+
+
+def bms_copy_member(name: str) -> str:
+    """A copied member holding attribute equates, pulled in by COPY.
+
+    Its symbols are referenced from the mapset that copies it, so a tool that
+    does not follow the COPY cannot resolve them.
+    """
+    L = [
+        "*" * 71,
+        f"* {name} -- standard 3270 attribute equates",
+        "*" * 71,
+        "ATTRUNP  EQU   X'40'",
+        "ATTRBRT  EQU   X'C8'",
+        "ATTRNUM  EQU   X'50'",
+    ]
+    return "\n".join(L) + "\n"
+
+
+def bms_directives(name: str, member: str) -> str:
+    """A mapset carrying the HLASM statements that surround BMS macros.
+
+    None of this is BMS, all of it turns up in BMS source, and a parser written
+    to the BMS macro list alone has nowhere to put any of it: TITLE with a name
+    in column 1, PRINT with an operand, EJECT with none, SPACE with an optional
+    one, COPY of a member whose symbols are used here, EQU against the location
+    counter (`*`), against a self-defining term (`X'40'`) and against
+    arithmetic (`*+4`), and TERM=3270-2 -- an operand value with a hyphen in it,
+    which an operand lexer that reads - as arithmetic splits in two.
+    """
+    L = [
+        f"{name:<9}TITLE '{name} -- HLASM DIRECTIVES IN A BMS MAPSET'",
+        "         PRINT NOGEN",
+        "         SPACE 2",
+        f"         COPY  {member}",
+        "         EJECT",
+        "MAPBASE  EQU   *",
+        "ATTRPROT EQU   X'40'",
+        "MAPNEXT  EQU   *+4",
+        # Resolvable only by following the COPY above.
+        "STDBRT   EQU   ATTRBRT",
+        _bms_cont(f"{name:<9}DFHMSD TYPE=MAP,MODE=INOUT,TERM=3270-2,"),
+        "               CTRL=(FREEKB,FRSET),LANG=COBOL,STORAGE=AUTO,"
+        "TIOAPFX=YES",
+        f"{name[:7]}I DFHMDI SIZE=(24,80)",
+        "HDRTTL   DFHMDF POS=(1,1),LENGTH=40,ATTRB=(PROT)",
+        "CUSTNO   DFHMDF POS=(5,20),LENGTH=10,ATTRB=(UNPROT,IC)",
+        "ERRMSG   DFHMDF POS=(23,1),LENGTH=70,ATTRB=(PROT,BRT)",
+        f"{name:<9}DFHMSD TYPE=FINAL",
+        "         END",
+    ]
+    return "\n".join(L) + "\n"
+
+
+def bms_transfer_damage(name: str) -> str:
+    """What reaches a repository when a mapset comes off a mainframe.
+
+    This one is NOT valid HLASM, on purpose, and it is the only generated
+    artefact that is not. A tool has to survive it and say what is wrong with
+    it, not abort the directory:
+
+      * a 0x1A byte at end of file -- the DOS/mainframe transfer EOF mark. A
+        reader that treats it as content loses the whole file.
+      * tabs where blanks belong, which shift every column that follows.
+      * a blank record straight after a column-72 marker, so the continuation
+        never arrives.
+      * a continuation resuming in column 19 *outside* a literal, where the
+        blanks end the operand field instead of padding a string.
+    """
+    L = [
+        _bms_cont(f"{name:<9}DFHMSD TYPE=MAP,MODE=INOUT,"
+                  "CTRL=(FREEKB,FRSET),"),
+        "",
+        "               LANG=COBOL,STORAGE=AUTO,TIOAPFX=YES",
+        f"{name[:7]}I DFHMDI SIZE=(24,80)",
+        "TABBED\tDFHMDF\tPOS=(1,1),LENGTH=20,ATTRB=(PROT)",
+        _bms_cont("LATERES  DFHMDF POS=(3,1),LENGTH=10,"),
+        "                  ATTRB=(UNPROT)",
+        "         DFHMSD TYPE=FINAL",
+        "         END",
+    ]
+    return "\n".join(L) + "\n\x1a"
 
 
 def csd_defines(progs: list[Prog], group: str = "GENAVOL") -> str:
@@ -1867,7 +2197,9 @@ def main(argv: list[str] | None = None) -> int:
                          "Use until an over-window fallback exists, then drop it")
     ap.add_argument("--layout", choices=["domain", "flat"], default="domain")
     ap.add_argument("--seqnums", action="store_true",
-                    help="emit sequence numbers in cols 73-80 (z/OS export style)")
+                    help="number the COBOL sequence area, cols 1-6 (z/OS "
+                         "export style). Generated BMS varies its own use of "
+                         "cols 73-80 per mapset and is not affected by this")
     ap.add_argument("--no-artefacts", action="store_true",
                     help="skip JCL/BMS/CSD/DDL, emit COBOL only")
     ap.add_argument("--gzip-manifest", action="store_true",
@@ -1912,16 +2244,41 @@ def main(argv: list[str] | None = None) -> int:
             body = fh.read()
         write(os.path.join(out, "src/attic", f"{p.name}.cbl"), body)
 
+    bms_features: dict[str, int] = {}
+    bms_literals: dict[str, str] = {}
+    # Recorded as the files are written, so the manifest cannot claim a hazard
+    # the run did not emit.
+    bms_hazards: dict[str, str | None] = {
+        k: None for k in ("bms_mnemonic_collision", "bms_ampersand",
+                          "bms_literal_continuation", "bms_copy_member",
+                          "bms_directives", "bms_transfer_damage")
+    }
     if not cfg.no_artefacts:
         mapsets = sorted({p.mapset for p in topo.order if p.mapset})
         for ms in mapsets:
-            write(os.path.join(out, "bms", f"{ms}.bms"), bms_mapset(ms))
+            # Seeded by name rather than drawn from the shared rng, so a
+            # mapset's variation is the same whatever else the run emits.
+            text, feats = bms_mapset(ms, random.Random(f"{cfg.seed}:bms:{ms}"))
+            write(os.path.join(out, "bms", f"{ms}.bms"), text)
+            for f in feats:
+                bms_features[f] = bms_features.get(f, 0) + 1
         if mapsets and cfg.pathological:
-            # Labelled lexer-hazard mapsets, both recorded in the manifest.
-            write(os.path.join(out, "bms", "ZZMNEMON.bms"),
-                  bms_mnemonic_collision("ZZMNEMON"))
-            write(os.path.join(out, "bms", "ZZAMPERS.bms"),
-                  bms_ampersand("ZZAMPERS"))
+            # Labelled hazard mapsets, every one recorded in the manifest.
+            lit_text, bms_literals = bms_literal_continuation("ZZLITRAL")
+            for key, member, text in [
+                ("bms_mnemonic_collision", "ZZMNEMON",
+                 bms_mnemonic_collision("ZZMNEMON")),
+                ("bms_ampersand", "ZZAMPERS", bms_ampersand("ZZAMPERS")),
+                ("bms_literal_continuation", "ZZLITRAL", lit_text),
+                ("bms_copy_member", "ZZSTDAT", bms_copy_member("ZZSTDAT")),
+                ("bms_directives", "ZZDIRECT",
+                 bms_directives("ZZDIRECT", "ZZSTDAT")),
+                ("bms_transfer_damage", "ZZDAMAGE",
+                 bms_transfer_damage("ZZDAMAGE")),
+            ]:
+                path = os.path.join("bms", f"{member}.bms")
+                write(os.path.join(out, path), text)
+                bms_hazards[key] = path
         for j in topo.jobs:
             steps = [
                 (st["step"], st["program"], st["dd_names"]) for st in j["steps"]
@@ -1952,14 +2309,20 @@ def main(argv: list[str] | None = None) -> int:
             "hubs": getattr(topo, "hubs", []),
             "pathological": getattr(topo, "pathological", []),
             "boundary": getattr(topo, "boundary", []),
-            "bms_mnemonic_collision": (
-                "bms/ZZMNEMON.bms" if not cfg.no_artefacts and cfg.pathological
-                else None
-            ),
-            "bms_ampersand": (
-                "bms/ZZAMPERS.bms" if not cfg.no_artefacts and cfg.pathological
-                else None
-            ),
+            **bms_hazards,
+            # The reassembled INITIAL value for each field of the literal
+            # mapset. Score a parser against these: they are the cases that
+            # fail without raising anything.
+            "bms_literal_expected": bms_literals or None,
+            # How the bulk mapsets actually came out, per feature, in files.
+            # Reported rather than asserted -- a feature missing here is a
+            # feature the corpus does not cover, whatever the intent was.
+            "bms_variation": {
+                "files": len(
+                    {p.mapset for p in topo.order if p.mapset}
+                ) if not cfg.no_artefacts else 0,
+                "features": bms_features,
+            },
         },
         "window_cap": {
             "applied": bool(topo.window_budget_chars),

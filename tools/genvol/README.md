@@ -50,7 +50,7 @@ Useful flags:
 | `--window-tokens` | 200000 | the target model's context window |
 | `--chars-per-token` | 3.5 | **measure this** with `count_tokens`; the default is a placeholder |
 | `--window-reserve` | 0.15 | share of the window held back for prompt and output |
-| `--seqnums` | off | sequence numbers in cols 73--80, as in a real z/OS export |
+| `--seqnums` | off | number the COBOL sequence area, cols 1--6, as in a real z/OS export. Generated BMS varies its own use of cols 73--80 per mapset and ignores this flag |
 | `--layout` | domain | `domain` nests under `src/<DD>/`, `flat` puts everything in `src/` |
 | `--gzip-manifest` | off | write `manifest.json.gz` instead of `manifest.json`. Required above ~90k programs, where the plain manifest passes GitHub's 100 MiB per-file limit |
 | `--seed` | 20260729 | output is fully deterministic for a given seed |
@@ -67,6 +67,7 @@ generated/
   src/attic/                     one deliberately duplicated PROGRAM-ID
   copybook/<DOMAIN>/ZK*.cpy      record layouts, commarea, constants
   bms/Z<DD>MAPnn.bms             mapsets for the online drivers
+  bms/ZZ*.bms                    labelled BMS hazards (see below)
   jcl/VJOBnnnn.jcl               multi-step jobs -> EXEC PGM= edges
   cntl/csdvol.txt                CSD input: TRANSID -> program bindings
   ddl/schema.sql                 tables referenced from EXEC SQL
@@ -206,21 +207,86 @@ error-logging module called from everywhere is the `LGSTSQ` pattern — but they
 are infrastructure, not coupling. Whether a tool tells the two apart is itself
 worth measuring.
 
-## BMS caveat
+## BMS
 
-Generated mapsets mark continued statements with `X` in **column 72**, as HLASM
-requires and as the reference `ssmap.bms` does. Field names deliberately avoid
-assembler instruction mnemonics, except in one labelled mapset,
-`bms/ZZMNEMON.bms`, whose fields are named `TITLE`, `START`, `END`, `COPY`,
-`EQU`, `USING`, `SPACE`, `PRINT` — all valid in the name field (column 1), all
-mis-read by a lexer that matches keywords by token rather than by column
-position. It is recorded in `injected.bms_mnemonic_collision`, so a finding there
-is a real one rather than an artifact.
+Mapsets are HLASM, whose fixed format is **not** COBOL's:
 
-`bms/ZZAMPERS.bms` covers the other ampersand hazard, recorded in
-`injected.bms_ampersand`. In HLASM, `&SYSPARM` is a **variable symbol** (a single
-ampersand) while `&&` is an escape for a literal ampersand and *only* inside a
-quoted string — so `INITIAL='PROFIT && LOSS ACCOUNT'` renders one ampersand.
+```
+cols 1-71   name, operation, operands, remark
+col  72     continuation indicator — ANY non-blank means "continued"
+cols 73-80  sequence area, ignored by the assembler
+```
+
+A continued statement resumes in the **continue column**, column 16.
+
+### Variation in the bulk mapsets
+
+Every `bms/Z<DD>MAPnn.bms` is valid BMS, and every one differs. What varies is
+what a fixed template never moves, and what a parser therefore never gets
+tested on:
+
+| | |
+|---|---|
+| column 72 | mostly `X`, some `*`, a few `C` `Y` `-` `1` — any non-blank continues |
+| cols 73-80 | absent, present throughout, or on a subset of records within one file |
+| continuation | resumes in column 16, or later — but only inside a quoted literal, where columns 16..71 are content and the leading blanks belong to the string. A late resumption **outside** a literal is a different thing and is a labelled case, not bulk variation |
+| column 71 | a literal filled hard against the marker, so column 71 holds real content and nothing separates it from column 72 |
+| comments | `*` banners in column 1, between and before statements |
+| remarks | after the operands of a plain statement, and after the trailing comma of a **continued** one, where column 72 still continues the statement |
+| literals | upper and mixed case. Lower case inside a literal is real and frequent; outside one it would be invalid |
+| `DFHMSD` | `TYPE=FINAL` with and without a name; `TERM=3270-2`, a value with a hyphen in it |
+| directives | `PRINT NOGEN`, `EJECT`, `SPACE n`, `TITLE` with a name in column 1 |
+| blank records | wholly blank and blanks-only, between statements |
+
+`injected.bms_variation` in the manifest reports the mix **as generated**,
+per feature, in files. It is a count of what came out, not an assertion of what
+was intended: a feature missing there is a feature the corpus does not cover.
+
+### Labelled hazards
+
+Under `--pathological`, each recorded in `injected` under its own key:
+
+| file | hazard |
+|---|---|
+| `ZZMNEMON.bms` | fields named `TITLE`, `START`, `END`, `COPY`, `EQU`, `USING`, `SPACE`, `PRINT` — all valid in the name field (column 1), all mis-read by a lexer matching keywords by token rather than by column position |
+| `ZZAMPERS.bms` | `&SYSPARM` is a **variable symbol** (one ampersand); `&&` escapes a literal ampersand and *only* inside a quoted string, so `INITIAL='PROFIT && LOSS ACCOUNT'` renders one |
+| `ZZLITRAL.bms` | literals where the record boundary is content: one spanning **three** records, one resuming in column 17 so column 16 is a blank inside the string, one stopping short of column 71 so the padding is in the string |
+| `ZZDIRECT.bms` | the HLASM statements that surround BMS macros — `TITLE` with a name, `PRINT NOGEN`, `EJECT`, `SPACE 2`, `COPY`, `EQU` against `*`, against `X'40'` and against `*+4`, and `TERM=3270-2` |
+| `ZZSTDAT.bms` | the member `ZZDIRECT` copies. `STDBRT EQU ATTRBRT` resolves only by following the `COPY` |
+| `ZZDAMAGE.bms` | **not valid HLASM**, on purpose, and the only generated artefact that is not: a `0x1A` transfer EOF mark, tabs where blanks belong, a blank record straight after a column-72 marker, and a continuation resuming in column 19 outside a literal |
+
+`injected.bms_literal_expected` carries the exact string HLASM assembles for
+each field of `ZZLITRAL.bms`. Score a parser against those: every case in that
+file fails **silently**, producing a shorter or longer literal without raising
+anything, so the reassembled value is the only thing that distinguishes a
+correct parser from a plausible one.
+
+### If you write a script to measure a corpus
+
+Thread the quote state across records. A per-record check walks into ASCII-art
+literals and reports the contents as remarks, and calls the closing record of
+every continued literal an unterminated string. `ZZLITRAL.bms` and the banner
+comments in the bulk mapsets will both catch that.
+
+### The three-record literal
+
+`ZZLITRAL.bms` is the one place here resting on the manual rather than on
+observed source: literals spanning three or more records are documented but
+rare, and neither this generator's earlier output nor a sample of real mapsets
+contained one. That is a reason to generate it, not a reason to drop it —
+**zero occurrences in a generated corpus is not evidence about the language**,
+it is evidence about the generator. When something looks absent, check real
+source rather than the corpus:
+
+```sh
+gh search code --limit 30 "DFHMSD TYPE=&SYSPARM"
+```
+
+Fetch the hits with `curl` from `raw.githubusercontent.com`. Never through
+anything that renders to markdown — in fixed-format source the columns *are*
+the data.
+
+## JCL
 
 Generated JCL carries both ampersand forms, because they are different
 constructs rather than escaped and unescaped spellings of one: `&SYSUID` and
