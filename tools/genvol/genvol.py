@@ -7,9 +7,9 @@ chains, orphans, dynamic dispatch) and then emits source that materialises it,
 writing the exact expected graph to manifest.json so tool output can be scored
 against ground truth instead of eyeballed.
 
-Style is modelled on the GenApp base application (base/src): fixed-format
-COBOL, eyecatchers in WORKING-STORAGE, commarea copybooks, EXEC CICS LINK to a
-shared error hub, EXEC SQL in the data layer, VSAM in the file layer.
+Style follows the conventions of a real CICS estate: fixed-format COBOL,
+eyecatchers in WORKING-STORAGE, commarea copybooks, EXEC CICS LINK to a shared
+error hub, EXEC SQL in the data layer, VSAM in the file layer.
 
 Nothing here is meant to run on z/OS -- it is meant to be *read* by tools.
 """
@@ -66,8 +66,8 @@ def b(text: str, indent: int = 0) -> str:
 # Vocabulary -- keeps generated text lexically diverse
 # ---------------------------------------------------------------------------
 
-# Two-letter subsystem codes. The first ten are GenApp's own; the rest extend
-# the vocabulary so a large estate is not forced into ten giant blobs. None may
+# Two-letter subsystem codes. Ten would force a large estate into ten giant
+# blobs, so the vocabulary runs well past that. None may
 # start with K, which is reserved for the ZK copybook prefix.
 DOMAINS = {
     "MT": ("MOTOR", "motor policy"),
@@ -606,7 +606,7 @@ class Topology:
                             p.calls.append(Call(t.name, KIND_CALL))
 
     def _inject_hubs(self) -> None:
-        """A handful of utilities called from almost everywhere (LGSTSQ-like)."""
+        """A handful of utilities called from almost everywhere."""
         utils = self.by_type.get("util", [])
         if not utils:
             return
@@ -1712,7 +1712,7 @@ def bms_mapset(name: str, rng: random.Random) -> tuple[str, list[str]]:
         # entirely, and is a labelled case in bms_transfer_damage().
         resume = rng.choice([17, 19, 37])
         left, right = rng.choice([
-            ("CUSTOMER POLICY ENQUIRY", "GENAPP VOLUME TEST"),
+            ("CUSTOMER POLICY ENQUIRY", "VOLAPP VOLUME TEST"),
             ("POLICY DETAIL", "Page 1 of 1"),
             ("BROKER ENQUIRY", "PF3 Exit"),
         ])
@@ -1830,10 +1830,10 @@ def jcl_job(job: str, steps: list[tuple[str, str, list[str]]]) -> str:
     ]
     for step, pgm, dds in steps:
         L.append(f"//{step:<8} EXEC PGM={pgm}")
-        L.append("//STEPLIB  DD DISP=SHR,DSN=GENAPP.LOADLIB")
-        L.append("//SYSIN    DD DISP=SHR,DSN=GENAPP.PARMLIB(&MEM)")
+        L.append("//STEPLIB  DD DISP=SHR,DSN=VOLAPP.LOADLIB")
+        L.append("//SYSIN    DD DISP=SHR,DSN=VOLAPP.PARMLIB(&MEM)")
         for dd in dds:
-            L.append(f"//{dd:<8} DD DISP=SHR,DSN=GENAPP.{dd}.DATA")
+            L.append(f"//{dd:<8} DD DISP=SHR,DSN=VOLAPP.{dd}.DATA")
         L.append("//WORKDS   DD DSN=&&WORK,DISP=(NEW,PASS),UNIT=SYSDA,")
         L.append("//            SPACE=(TRK,(20,10))")
         L.append("//SORTWK   DD DSN=&&SORTWK,DISP=(NEW,DELETE),UNIT=SYSDA,")
@@ -2234,7 +2234,7 @@ def graph_metrics(topo: Topology) -> dict:
 
     # Domain coupling, reported twice: with and without edges into a shared
     # utility. Hub edges are legitimately dense -- an error-logging module
-    # called from everywhere is the LGSTSQ pattern -- but they are
+    # called from everywhere is the classic case -- but they are
     # infrastructure, not subsystem coupling, and mixing them in makes the
     # coupling graph look complete. A tool worth its salt separates them.
     hub_set = set(getattr(topo, "hubs", []))

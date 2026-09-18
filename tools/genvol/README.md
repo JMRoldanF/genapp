@@ -4,9 +4,9 @@ Generates thousands of realistic COBOL/CICS/Db2 programs, plus the copybooks,
 JCL, BMS maps, CSD definitions and DDL that surround them, together with a
 `manifest.json` holding the **exact expected call graph**.
 
-The point is not just volume. Cloning `base/src` a thousand times gives you
-bytes but a degenerate graph, so it tells you nothing about whether a tool's
-graph output is *correct*. `genvol` builds the topology first -- layers,
+The point is not just volume. Cloning one sample application's source a
+thousand times gives you bytes but a degenerate graph, so it tells you nothing
+about whether a tool's graph output is *correct*. `genvol` builds the topology first -- layers,
 domains, hubs, cycles, long chains, orphans, dynamic dispatch -- and then emits
 source that materialises it, so you can score precision and recall instead of
 eyeballing the result.
@@ -79,10 +79,10 @@ generated/
   manifest.json                  ground truth
 ```
 
-Programs follow the GenApp base layering: online drivers (BMS, `EXEC CICS
-LINK`) over business logic over a data layer split between `EXEC SQL` and VSAM
-file control, with standalone subroutines, batch programs and a small set of
-high-fan-in utilities modelled on `LGSTSQ`.
+Programs follow the layering a real CICS estate has: online drivers (BMS, `EXEC
+CICS LINK`) over business logic over a data layer split between `EXEC SQL` and
+VSAM file control, with standalone subroutines, batch programs and a small set
+of high-fan-in shared utilities.
 
 ## Edge kinds
 
@@ -208,7 +208,7 @@ Measured on a 3.000-program, 30-domain run:
 `expected_graph.coupling` in the manifest reports this both ways, and every edge
 carries a `to_hub` flag. **Score subsystem coupling against
 `density_excluding_hubs`.** Hub edges are legitimately dense — a shared
-error-logging module called from everywhere is the `LGSTSQ` pattern — but they
+error-logging module called from everywhere is the classic case — but they
 are infrastructure, not coupling. Whether a tool tells the two apart is itself
 worth measuring.
 
