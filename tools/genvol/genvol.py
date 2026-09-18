@@ -203,6 +203,10 @@ class Prog:
     transid: str | None = None
     calls: list[Call] = field(default_factory=list)
     copybooks: list[str] = field(default_factory=list)
+    # Copied into the PROCEDURE DIVISION, not the LINKAGE SECTION. Data
+    # copybooks cannot hold a statement, so a copybook that carries one needs a
+    # different copy site or the program stops being valid COBOL.
+    procedure_copybooks: list[str] = field(default_factory=list)
     tables: list[str] = field(default_factory=list)
     vsam_files: list[str] = field(default_factory=list)
     mapset: str | None = None
@@ -217,8 +221,14 @@ class Prog:
 class Copybook:
     name: str
     domain: str
-    kind: str                 # commarea | record | constants
+    kind: str                 # commarea | record | constants | procedure
     copies: list[str] = field(default_factory=list)
+    # Statements a procedure copybook carries. An edge declared here is
+    # reachable only by expanding the COPY closure that leads to it, which is
+    # what makes it an intrinsic edge rather than one the program's own text
+    # already shows.
+    calls: list[Call] = field(default_factory=list)
+    depth: int = 0            # levels below the chain head, 0 for the head
     path: str = ""
     lines: int = 0
 
@@ -316,6 +326,9 @@ class Topology:
         if self.cfg.boundary:
             self._inject_boundary()
         self._build_jobs()
+        # Last: the closures read program names, and injection above is still
+        # adding and rewiring programs until this point.
+        self._wire_copybook_closures()
 
     # -- copybooks ---------------------------------------------------------
     def _build_copybooks(self) -> None:
@@ -340,6 +353,77 @@ class Topology:
                 self.copybooks[cb.name] = cb
                 books.append(cb.name)
             self.domain_books[dom] = books
+
+        self.closure_heads: list[str] = []
+        if getattr(self.cfg, "copybook_chains", 0) > 0:
+            self._build_copybook_closures()
+
+    def _build_copybook_closures(self) -> None:
+        """
+        Chains of nested copybooks, deep enough that expanding one is the work.
+
+        The estate's ordinary copybooks are two levels at most, so a tool that
+        expands a COPY closure finishes instantly and a tool that does not looks
+        identical. These chains separate them, and they carry statements (see
+        _wire_copybook_closures) so the closure holds edges nothing else shows.
+
+        Depth is drawn from a heavy tail rather than fixed: most chains are
+        shallow and a few are deep. That is the shape that matters for anything
+        parallelising the walk -- with the work spread evenly, threads help in
+        proportion; concentrated in a few closures, the deepest one sets the
+        wall clock however many threads are used.
+        """
+        max_depth = max(1, self.cfg.copybook_chain_depth)
+        for c in range(self.cfg.copybook_chains):
+            dom = self.domains[c % len(self.domains)]
+            depth = 1 + int((max_depth - 1) * (self.rng.random() ** 3))
+            previous: Copybook | None = None
+            for level in range(depth):
+                cb = Copybook(f"ZKX{c:04d}{level:02d}", dom, "procedure", depth=level)
+                self.copybooks[cb.name] = cb
+                if previous is None:
+                    self.closure_heads.append(cb.name)
+                else:
+                    previous.copies.append(cb.name)
+                previous = cb
+
+    def _wire_copybook_closures(self) -> None:
+        """
+        Attaches each chain to programs and hands its members their statements.
+
+        The head carries nothing: a call in the head is visible to anything that
+        reads the program's own copy list, which is not the case under test. The
+        statements go below it, so only expanding the closure reveals them.
+
+        How many chains there are is absolute, like the hub count: a share of
+        the estate would turn a few deep closures into thousands of shallow
+        ones and lose the shape worth generating. What scales is how many
+        programs copy one, so the expansion work a tool faces grows with the
+        corpus instead of staying at a fixed handful whatever its size.
+        """
+        if not getattr(self, "closure_heads", None):
+            return
+
+        heads = self.closure_heads
+        targets = [p.name for p in self.order]
+        if not targets:
+            return
+
+        # Round-robin over the drawn programs rather than a draw per head:
+        # every chain is copied by someone, and fan-in stays even so the depth
+        # tail is the only thing varying the cost of a closure.
+        drawn = [p for p in self.order
+                 if self.rng.random() < self.cfg.copybook_chain_density]
+        for i, p in enumerate(drawn):
+            p.procedure_copybooks.append(heads[i % len(heads)])
+
+        rate = self.cfg.copybook_call_rate
+        for cb in self.copybooks.values():
+            if cb.kind != "procedure" or cb.depth == 0:
+                continue
+            if self.rng.random() >= rate:
+                continue
+            cb.calls.append(Call(self.rng.choice(targets), KIND_LINK))
 
     # -- programs ----------------------------------------------------------
     def _build_programs(self) -> None:
@@ -1289,6 +1373,8 @@ class Emitter:
         L.append(rule())
         L.append(a("MAINLINE SECTION."))
         L.append(b("INITIALIZE WS-HEADER.", 4))
+        for cb in p.procedure_copybooks:
+            L.append(b(f"COPY {cb}.", 4))
         if p.ptype != "batch":
             L.append(b("MOVE EIBTRNID TO WS-TRANSID.", 4))
             L.append(b("MOVE EIBTRMID TO WS-TERMID.", 4))
@@ -1418,6 +1504,18 @@ class Emitter:
             L.append(b("07 CA-BROKERID        PIC 9(10).", 10))
             L.append(b("07 CA-PAYMENT         PIC 9(6).", 10))
             L.append(b("05 CA-POLICY-FILLER      PIC X(32400).", 7))
+        elif cb.kind == "procedure":
+            # Statements, not a layout: this is copied into the PROCEDURE
+            # DIVISION. A chain member with no call of its own still costs the
+            # expansion, which is the point of the deep ones.
+            L.append(cmt(f" closure level {cb.depth}"))
+            for c in cb.calls:
+                L.append(b(f"EXEC CICS LINK PROGRAM('{c.target}')", 4))
+                L.append(b("     COMMAREA(DFHCOMMAREA)", 9))
+                L.append(b("     LENGTH(WS-CA-LEN)", 9))
+                L.append(b("END-EXEC", 4))
+            if not cb.calls:
+                L.append(b("CONTINUE.", 4))
         elif cb.kind == "constants":
             L.append(a("01  WS-CONSTANTS."))
             for i, e in enumerate(ENTITIES):
@@ -1945,6 +2043,67 @@ def ddl(tables: set[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def closure_calls(topo: Topology, heads: list[str]) -> list[Call]:
+    """
+    Every call reachable from `heads` by following COPY, head included.
+
+    This is the expected answer for a tool that expands a copybook closure. A
+    tool that reads only the program's own text finds none of them, which is
+    exactly the recall gap these chains exist to measure.
+    """
+    found: list[Call] = []
+    seen: set[str] = set()
+    stack = list(heads)
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        cb = topo.copybooks.get(name)
+        if cb is None:
+            continue
+        found.extend(cb.calls)
+        stack.extend(cb.copies)
+    return found
+
+
+def closure_report(topo: Topology) -> dict:
+    """
+    What the COPY closures hold, so a tool can be scored on them separately.
+
+    Kept apart from the headline edge count because the interesting number is
+    not how many edges exist but how many are invisible without expanding a
+    closure -- a tool can score well overall and still find none of these.
+    """
+    chain_books = [cb for cb in topo.copybooks.values() if cb.kind == "procedure"]
+    if not chain_books:
+        return {"chains": 0, "copybooks": 0, "edges_only_via_closure": 0}
+
+    heads = sorted(getattr(topo, "closure_heads", []))
+    depths = [len([c for c in chain_books if c.name.startswith(h[:7])]) for h in heads]
+    owners = [
+        {"copybook": cb.name, "depth": cb.depth,
+         "targets": sorted(c.target for c in cb.calls)}
+        for cb in sorted(chain_books, key=lambda c: c.name) if cb.calls
+    ]
+    reached = sum(
+        len(closure_calls(topo, p.procedure_copybooks)) for p in topo.order
+    )
+    return {
+        "chains": len(heads),
+        "copybooks": len(chain_books),
+        "deepest_chain": max(depths) if depths else 0,
+        "depth_histogram": {str(d): depths.count(d) for d in sorted(set(depths))},
+        "copybooks_declaring_a_call": len(owners),
+        "edges_only_via_closure": reached,
+        "owners_sample": owners[:25],
+        "note": "edges_only_via_closure counts program->target pairs declared "
+                "inside a copybook the program copies. A tool that does not "
+                "expand COPY finds none of them; they are included in the "
+                "headline edges and edges_by_kind.",
+    }
+
+
 def graph_metrics(topo: Topology) -> dict:
     jobs = getattr(topo, "jobs", [])
     # JCL jobs are graph nodes too: without the EXEC PGM= edge a batch module
@@ -1956,6 +2115,13 @@ def graph_metrics(topo: Topology) -> dict:
     edges = 0
     for p in topo.order:
         for c in p.calls:
+            if c.target in idx:
+                adj[idx[p.name]].append(idx[c.target])
+            edge_kinds[c.kind] = edge_kinds.get(c.kind, 0) + 1
+            edges += 1
+        # Declared inside a copybook the program copies, so the edge is the
+        # program's even though its own source never names the target.
+        for c in closure_calls(topo, p.procedure_copybooks):
             if c.target in idx:
                 adj[idx[p.name]].append(idx[c.target])
             edge_kinds[c.kind] = edge_kinds.get(c.kind, 0) + 1
@@ -2128,6 +2294,7 @@ def graph_metrics(topo: Topology) -> dict:
         "orphans_sample": orphans[:50],
         "max_call_depth_sampled": max_depth,
         "hubs": hubs,
+        "copybook_closure": closure_report(topo),
         "copybook_fan_in_top": sorted(
             ({"copybook": k, "fan_in": v} for k, v in cb_fan_in.items()),
             key=lambda d: -d["fan_in"],
@@ -2168,6 +2335,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--drivers-per-mapset", type=int, default=8,
                     help="online drivers sharing one BMS mapset")
     ap.add_argument("--copybooks-per-domain", type=int, default=12)
+    ap.add_argument("--copybook-chains", type=int, default=0,
+                    help="chains of nested copybooks carrying statements only a "
+                         "COPY-closure expansion reveals; 0 leaves the estate as it was")
+    ap.add_argument("--copybook-chain-depth", type=int, default=6,
+                    help="deepest a chain may go; actual depth is drawn from a "
+                         "heavy tail so most are shallow and a few are not")
+    ap.add_argument("--copybook-call-rate", type=float, default=0.35,
+                    help="share of non-head chain members carrying a LINK")
+    ap.add_argument("--copybook-chain-density", type=float, default=0.4,
+                    help="share of programs copying a chain head. Unlike the "
+                         "chain count this scales with -n, so the expansion "
+                         "work grows with the estate")
     ap.add_argument("--hub-density", type=float, default=0.55,
                     help="fraction of programs that LINK to a shared utility")
     ap.add_argument("--hubs", type=int, default=6,
@@ -2285,10 +2464,14 @@ def main(argv: list[str] | None = None) -> int:
             ]
             write(os.path.join(out, "jcl", f"{j['name']}.jcl"),
                   jcl_job(j["name"], steps))
-        write(os.path.join(out, "cntl", "csdvol.txt"), csd_defines(topo.order))
+        # The extension is what a mainframe parser dispatches on, and both of
+        # these carry an answer key: the CSD resolves CICS_START through its
+        # TRANSID bindings, the DDL resolves the tables behind EXEC SQL. Under
+        # any other suffix the corpus poses the question and hides the answer.
+        write(os.path.join(out, "cntl", "csdvol.csd"), csd_defines(topo.order))
         tables = {t for p in topo.order for t in p.tables}
         if tables:
-            write(os.path.join(out, "ddl", "schema.sql"), ddl(tables))
+            write(os.path.join(out, "ddl", "schema.ddl"), ddl(tables))
 
     metrics = graph_metrics(topo)
     hub_names = set(getattr(topo, "hubs", []))

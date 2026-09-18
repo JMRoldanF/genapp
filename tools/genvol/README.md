@@ -39,6 +39,10 @@ Useful flags:
 | `--domains` | 10 | business subsystems, max 60. **Scale with `-n`** — ten domains at 100k programs means ten blobs of 10.000 |
 | `--partners` | 2 5 | how many other domains each domain calls into, keeping coupling sparse and uneven |
 | `--drivers-per-mapset` | 8 | online drivers sharing one BMS mapset |
+| `--copybook-chains` | 0 | chains of nested copybooks carrying statements only a COPY-closure expansion reveals. 0 leaves the estate exactly as it was |
+| `--copybook-chain-depth` | 6 | deepest a chain may go; actual depth is drawn from a heavy tail, so most chains are shallow and a few are not |
+| `--copybook-call-rate` | 0.35 | share of non-head chain members carrying a `LINK` |
+| `--copybook-chain-density` | 0.4 | share of programs copying a chain head. The one closure knob that **scales with `-n`** |
 | `--hub-density` | 0.55 | share of programs that LINK to a shared utility |
 | `--hubs` | 6 | number of high-fan-in utilities. Deliberately does **not** scale with `-n`: a proportional share would give 200 middling "hubs" at 100k programs instead of a few real ones |
 | `--dynamic-rate` | 0.12 | share of edges rewritten as dynamic dispatch |
@@ -66,11 +70,12 @@ generated/
   src/<DOMAIN>/Z<DD>NNNNN.cbl    programs, grouped by business domain
   src/attic/                     one deliberately duplicated PROGRAM-ID
   copybook/<DOMAIN>/ZK*.cpy      record layouts, commarea, constants
+  copybook/<DOMAIN>/ZKX*.cpy     COPY chains carrying statements (see below)
   bms/Z<DD>MAPnn.bms             mapsets for the online drivers
   bms/ZZ*.bms                    labelled BMS hazards (see below)
   jcl/VJOBnnnn.jcl               multi-step jobs -> EXEC PGM= edges
-  cntl/csdvol.txt                CSD input: TRANSID -> program bindings
-  ddl/schema.sql                 tables referenced from EXEC SQL
+  cntl/csdvol.csd                CSD input: TRANSID -> program bindings
+  ddl/schema.ddl                 tables referenced from EXEC SQL
   manifest.json                  ground truth
 ```
 
@@ -89,7 +94,7 @@ only reports literal `LINK` edges will look perfect on easy input:
 | `CICS_LINK`, `CICS_XCTL` on a literal | yes |
 | `CALL_STATIC` on a literal | yes |
 | `JCL_EXEC_PGM` | yes |
-| `CICS_START` via TRANSID | only by cross-referencing `cntl/csdvol.txt` |
+| `CICS_START` via TRANSID | only by cross-referencing `cntl/csdvol.csd` |
 | `CICS_LINK_DYNAMIC`, `CALL_DYNAMIC` | needs dataflow: the name arrives in a working-storage field, sometimes from an `OCCURS` dispatch table |
 
 `manifest.json` records the true target for every edge including the dynamic
@@ -293,6 +298,67 @@ constructs rather than escaped and unescaped spellings of one: `&SYSUID` and
 `&MEM` are symbolic parameters, while `&&WORK` and `&&SORTWK` are **temporary
 datasets**. A parser can get one right and the other wrong, so emitting only
 `&SYSUID` let a tool pass this corpus and still break on real JCL.
+
+## Copybook closures
+
+The estate's ordinary copybooks are **data**: record layouts, a commarea, a
+constants member, nested two levels at most. Nothing inside one can be a call
+site, so a tool that expands a COPY closure and a tool that ignores it produce
+the same call graph. That makes the corpus silent on a real failure mode — a
+`COPY` closure deep enough that expanding it is the work, holding edges the
+program's own source never names.
+
+`--copybook-chains N` adds them. Each chain is a head plus a nest of members;
+the head carries nothing, because a call there is visible to anything that reads
+the program's copy list. Below it, `--copybook-call-rate` of the members carry an
+`EXEC CICS LINK`, and those are copied into the **PROCEDURE DIVISION**, not the
+linkage section: a data copybook cannot hold a statement, and putting one there
+would emit COBOL that does not compile.
+
+The chain count is absolute and deliberately does **not** scale with `-n`, for
+the same reason `--hubs` does not: a proportional share would give thousands of
+shallow closures instead of a few deep ones, which is the shape the corpus
+exists to produce. What scales is `--copybook-chain-density`, the share of
+programs that copy a head — so the expansion work a tool faces grows with the
+estate rather than staying at a fixed handful of programs whatever its size.
+Chains are handed out round-robin among those programs, so every chain is
+copied by someone and fan-in stays even, leaving depth as the only thing that
+varies the cost of a closure.
+
+Depth is drawn from a heavy tail rather than fixed, which is the part worth
+keeping. With the work spread evenly across closures, parallelising the
+expansion helps in proportion to the threads; concentrated in a few deep ones,
+the deepest closure sets the wall clock however many threads are used. A
+generator that made every chain the same depth would hide that.
+
+Score against `expected_graph.copybook_closure`. These figures are one
+invocation, not invariants — `edges_only_via_closure` in particular tracks the
+program count, so read them off your own `manifest.json`:
+
+```
+genvol.py -n 300 --seed 4242 \
+  --copybook-chains 40 --copybook-chain-depth 8 --copybook-call-rate 0.4
+```
+
+```json
+{
+  "chains": 40,
+  "copybooks": 88,
+  "deepest_chain": 6,
+  "depth_histogram": {"1": 20, "2": 7, "3": 4, "4": 5, "5": 2, "6": 2},
+  "copybooks_declaring_a_call": 23,
+  "edges_only_via_closure": 71,
+  "owners_sample": [{"copybook": "ZKX000202", "depth": 2, "targets": ["ZCL00170"]}]
+}
+```
+
+At `-n 3000` the same flags give 1,222 programs carrying a closure and 771 such
+edges: the chains stay at 40, the work does not.
+
+`edges_only_via_closure` is the number that separates the two tools. Those edges
+are counted in the headline `edges` and in `edges_by_kind`, so a tool that never
+expands a closure reports a clean graph that is short by exactly that many, and
+`owners_sample` says which copybook each missing edge was declared in.
 
 ## Hostile cases
 
