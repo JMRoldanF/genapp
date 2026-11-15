@@ -1,0 +1,8 @@
+//REFBJ    JOB (ACCT),'X',CLASS=A
+//S1       EXEC PGM=A
+//OUT      DD DSN=PAY.HIST(+1),DISP=(NEW,CATLG)
+//S2       EXEC PGM=B
+//IN       DD DSN=*.S1.OUT,DISP=(OLD,PASS)
+//S3       EXEC PGM=C
+//IN       DD DSN=*.S2.IN,DISP=OLD
+//BAD      DD DSN=*.S9.OUT,DISP=OLD
