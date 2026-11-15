@@ -163,7 +163,7 @@
       *----------------------------------------------------------------*
       * If NO commarea received issue an ABEND
            IF EIBCALEN IS EQUAL TO ZERO
-               MOVE ' no commarea received' TO EM-VARIABLE
+               MOVE ' NO COMMAREA RECEIVED' TO EM-VARIABLE
                PERFORM WRITE-ERROR-MESSAGE
                EXEC CICS ABEND ABCODE('LGCA') NODUMP END-EXEC
            END-IF
@@ -264,7 +264,7 @@
            MOVE CA-BROKERID TO DB2-BROKERID-INT
            MOVE CA-PAYMENT TO DB2-PAYMENT-INT
 
-           MOVE ' INSERT POLICY' TO EM-SQLREQ
+           MOVE ' insert policy' TO EM-SQLREQ
            EXEC SQL
              INSERT INTO POLICY
                        ( POLICYNUMBER,
@@ -330,7 +330,7 @@
            MOVE CA-E-TERM        TO DB2-E-TERM-SINT
            MOVE CA-E-SUM-ASSURED TO DB2-E-SUMASSURED-INT
 
-           MOVE ' INSERT ENDOW ' TO EM-SQLREQ
+           MOVE ' insert endow ' TO EM-SQLREQ
       *----------------------------------------------------------------*
       *    There are 2 versions of INSERT...                           *
       *      one which updates all fields including Varchar            *
@@ -405,7 +405,7 @@
            MOVE CA-H-VALUE       TO DB2-H-VALUE-INT
            MOVE CA-H-BEDROOMS    TO DB2-H-BEDROOMS-SINT
 
-           MOVE ' INSERT HOUSE ' TO EM-SQLREQ
+           MOVE ' insert house ' TO EM-SQLREQ
            EXEC SQL
              INSERT INTO HOUSE
                        ( POLICYNUMBER,
@@ -445,7 +445,7 @@
            MOVE CA-M-PREMIUM     TO DB2-M-PREMIUM-INT
            MOVE CA-M-ACCIDENTS   TO DB2-M-ACCIDENTS-INT
 
-           MOVE ' INSERT MOTOR ' TO EM-SQLREQ
+           MOVE ' insert motor ' TO EM-SQLREQ
            EXEC SQL
              INSERT INTO MOTOR
                        ( POLICYNUMBER,
@@ -495,7 +495,7 @@
            MOVE CA-B-WeatherPremium  To DB2-B-WeatherPremium-Int
            MOVE CA-B-Status          To DB2-B-Status-Int
 
-           MOVE ' INSERT COMMER' TO EM-SQLREQ
+           MOVE ' insert commer' TO EM-SQLREQ
            EXEC SQL
              INSERT INTO COMMERCIAL
                        (

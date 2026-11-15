@@ -249,7 +249,7 @@
       *---------------------------------------------------------------*
       * If NO commarea received issue an ABEND
            IF EIBCALEN IS EQUAL TO ZERO
-             MOVE ' NO COMMAREA RECEIVED' TO EM-VARIABLE
+             MOVE ' no commarea received' TO EM-VARIABLE
              PERFORM WRITE-ERROR-MESSAGE
              EXEC CICS ABEND ABCODE('LGCA') NODUMP END-EXEC
            END-IF
@@ -326,7 +326,7 @@
       *================================================================*
        GET-ENDOW-DB2-INFO.
 
-           MOVE ' SELECT ENDOW ' TO EM-SQLREQ
+           MOVE ' select endow ' TO EM-SQLREQ
            EXEC SQL
              SELECT  ISSUEDATE,
                      EXPIRYDATE,
@@ -414,7 +414,7 @@
              END-IF
 
       *      Mark the end of the policy data
-             MOVE 'FINAL' TO CA-E-PADDING-DATA(END-POLICY-POS:5)
+             MOVE 'final' TO CA-E-PADDING-DATA(END-POLICY-POS:5)
 
            ELSE
       *      Non-zero SQLCODE from first SQL FETCH statement
@@ -440,7 +440,7 @@
       *================================================================*
        GET-HOUSE-DB2-INFO.
 
-           MOVE ' SELECT HOUSE ' TO EM-SQLREQ
+           MOVE ' select house ' TO EM-SQLREQ
            EXEC SQL
              SELECT  ISSUEDATE,
                      EXPIRYDATE,
@@ -505,7 +505,7 @@
              END-IF
 
       *      Mark the end of the policy data
-             MOVE 'FINAL' TO CA-H-FILLER(1:5)
+             MOVE 'final' TO CA-H-FILLER(1:5)
 
            ELSE
       *      Non-zero SQLCODE from first SQL FETCH statement
@@ -528,7 +528,7 @@
       *================================================================*
        GET-MOTOR-DB2-INFO.
 
-           MOVE ' SELECT MOTOR ' TO EM-SQLREQ
+           MOVE ' select motor ' TO EM-SQLREQ
            EXEC SQL
              SELECT  ISSUEDATE,
                      EXPIRYDATE,
@@ -603,7 +603,7 @@
              END-IF
 
       *      Mark the end of the policy data
-             MOVE 'FINAL' TO CA-M-FILLER(1:5)
+             MOVE 'final' TO CA-M-FILLER(1:5)
 
            ELSE
       *      Non-zero SQLCODE from first SQL FETCH statement
@@ -626,7 +626,7 @@
       *================================================================*
        GET-Commercial-DB2-INFO-1.
 
-           MOVE ' SELECT Commercial ' TO EM-SQLREQ
+           MOVE ' select cOMMERCIAL ' TO EM-SQLREQ
 
            EXEC SQL
              SELECT
@@ -705,7 +705,7 @@
              END-IF
 
       *      Mark the end of the policy data
-             MOVE 'FINAL' TO CA-B-FILLER(1:5)
+             MOVE 'final' TO CA-B-FILLER(1:5)
 
            ELSE
       *      Non-zero SQLCODE from first SQL FETCH statement
@@ -729,7 +729,7 @@
       *================================================================*
        GET-Commercial-DB2-INFO-2.
 
-           MOVE ' SELECT Commercial ' TO EM-SQLREQ
+           MOVE ' select cOMMERCIAL ' TO EM-SQLREQ
 
            EXEC SQL
              SELECT
@@ -810,7 +810,7 @@
              END-IF
 
       *      Mark the end of the policy data
-             MOVE 'FINAL' TO CA-B-FILLER(1:5)
+             MOVE 'final' TO CA-B-FILLER(1:5)
 
            ELSE
       *      Non-zero SQLCODE from first SQL FETCH statement
@@ -834,7 +834,7 @@
       *================================================================*
        GET-Commercial-DB2-INFO-3.
 
-           MOVE ' SELECT Commercial ' TO EM-SQLREQ
+           MOVE ' select cOMMERCIAL ' TO EM-SQLREQ
            Move 0 To ICOM-Record-Count
 
            EXEC SQL
@@ -918,7 +918,7 @@
       *================================================================*
        GET-Commercial-DB2-INFO-5.
 
-           MOVE ' SELECT Commercial ' TO EM-SQLREQ
+           MOVE ' select cOMMERCIAL ' TO EM-SQLREQ
 
            EXEC SQL
              OPEN Zip_Cursor

@@ -181,7 +181,7 @@
       *----------------------------------------------------------------*
       * If NO commarea received issue an ABEND
            IF EIBCALEN IS EQUAL TO ZERO
-               MOVE ' no commarea received' TO EM-VARIABLE
+               MOVE ' NO COMMAREA RECEIVED' TO EM-VARIABLE
                PERFORM WRITE-ERROR-MESSAGE
                EXEC CICS ABEND ABCODE('LGCA') NODUMP END-EXEC
            END-IF
@@ -226,7 +226,7 @@
       *   in CURSOR defintion.                                         *
       *================================================================*
        FETCH-DB2-POLICY-ROW.
-           MOVE ' FETCH  ROW   ' TO EM-SQLREQ
+           MOVE ' fetch  row   ' TO EM-SQLREQ
            EXEC SQL
              FETCH POLICY_CURSOR
              INTO  :DB2-ISSUEDATE,
@@ -251,7 +251,7 @@
        UPDATE-POLICY-DB2-INFO.
 
       *    Open the cursor.
-           MOVE ' OPEN   PCURSOR ' TO EM-SQLREQ
+           MOVE ' open   pcursor ' TO EM-SQLREQ
            EXEC SQL
              OPEN POLICY_CURSOR
            END-EXEC
@@ -314,7 +314,7 @@
                MOVE CA-PAYMENT       TO DB2-PAYMENT-INT
 
       *        Update policy table details
-               MOVE ' UPDATE POLICY  ' TO EM-SQLREQ
+               MOVE ' update policy  ' TO EM-SQLREQ
                EXEC SQL
                  UPDATE POLICY
                    SET ISSUEDATE        = :CA-ISSUE-DATE,
@@ -361,7 +361,7 @@
 
        CLOSE-PCURSOR.
       *    Now close the Cursor and we're done!
-           MOVE ' CLOSE  PCURSOR' TO EM-SQLREQ
+           MOVE ' close  pcursor' TO EM-SQLREQ
            EXEC SQL
              CLOSE POLICY_CURSOR
            END-EXEC.
@@ -371,7 +371,7 @@
                MOVE '00' TO CA-RETURN-CODE
              When -501
                MOVE '00' TO CA-RETURN-CODE
-               MOVE '-501 detected c' TO EM-SQLREQ
+               MOVE '-501 DETECTED C' TO EM-SQLREQ
                EXEC CICS RETURN END-EXEC
              When Other
                MOVE '90' TO CA-RETURN-CODE
@@ -390,7 +390,7 @@
            MOVE CA-E-TERM        TO DB2-E-TERM-SINT
            MOVE CA-E-SUM-ASSURED TO DB2-E-SUMASSURED-INT
 
-           MOVE ' UPDATE ENDOW ' TO EM-SQLREQ
+           MOVE ' update endow ' TO EM-SQLREQ
            EXEC SQL
              UPDATE ENDOWMENT
                SET
@@ -427,7 +427,7 @@
            MOVE CA-H-BEDROOMS    TO DB2-H-BEDROOMS-SINT
            MOVE CA-H-VALUE       TO DB2-H-VALUE-INT
 
-           MOVE ' UPDATE HOUSE ' TO EM-SQLREQ
+           MOVE ' update house ' TO EM-SQLREQ
            EXEC SQL
              UPDATE HOUSE
                SET
@@ -465,7 +465,7 @@
            MOVE CA-M-PREMIUM     TO DB2-M-PREMIUM-INT
            MOVE CA-M-ACCIDENTS   TO DB2-M-ACCIDENTS-INT
 
-           MOVE ' UPDATE MOTOR ' TO EM-SQLREQ
+           MOVE ' update motor ' TO EM-SQLREQ
            EXEC SQL
              UPDATE MOTOR
                SET

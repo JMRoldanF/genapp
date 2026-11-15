@@ -129,7 +129,7 @@
       *----------------------------------------------------------------*
       * If NO commarea received issue an ABEND
            IF EIBCALEN IS EQUAL TO ZERO
-               MOVE ' no commarea received' TO EM-VARIABLE
+               MOVE ' NO COMMAREA RECEIVED' TO EM-VARIABLE
                PERFORM WRITE-ERROR-MESSAGE
                EXEC CICS ABEND ABCODE('LGCA') NODUMP END-EXEC
            END-IF
@@ -185,7 +185,7 @@
       *================================================================*
        DELETE-POLICY-DB2-INFO.
 
-           MOVE ' DELETE POLICY  ' TO EM-SQLREQ
+           MOVE ' delete policy  ' TO EM-SQLREQ
            EXEC SQL
              DELETE
                FROM POLICY

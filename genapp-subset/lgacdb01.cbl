@@ -147,7 +147,7 @@
       *----------------------------------------------------------------*
       * If NO commarea received issue an ABEND
            IF EIBCALEN IS EQUAL TO ZERO
-               MOVE ' no COMMAREA RECEIVED' TO EM-VARIABLE
+               MOVE ' NO commarea received' TO EM-VARIABLE
                PERFORM WRITE-ERROR-MESSAGE
                EXEC CICS ABEND ABCODE('LGCA') NODUMP END-EXEC
            END-IF
@@ -216,7 +216,7 @@
       *================================================================*
       * Insert row into Customer table based on customer number        *
       *================================================================*
-           MOVE ' INSERT CUSTOMER' TO EM-SQLREQ
+           MOVE ' insert customer' TO EM-SQLREQ
       *================================================================*
            IF LGAC-NCS = 'ON'
              EXEC SQL
