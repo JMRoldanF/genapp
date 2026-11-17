@@ -38,4 +38,4 @@
            PERFORM P100                                                 00003800
            GOBACK.                                                      00003900
        P100.                                                            00004000
-           DISPLAY WS-FLAG.                                             00004100
+           DISPLAY 'QA V1923 FLAG ' WS-FLAG.                            00004100
